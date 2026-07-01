@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<!--
+  Visual demo for the diff-approval bubble.
+
+  Run via:  npx vite serve --open /diff-demo.html
+            (or open it through the dev server once it's running)
+
+  Hits several scenarios you can eyeball: small edit, large edit, new
+  file, no-op edit, very long single-line edit. Each scenario mounts the
+  real mountDiffApproval() from src/ai/ui/diff-approval.ts — the same
+  code path the live chat panel uses, so anything broken here is broken
+  there too.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Diff Approval — Visual Demo</title>
+    <style>
+        :root {
+            --bg: #1e1e1e;
+            --bg-2: #252526;
+            --bg-3: #2d2d2d;
+            --fg: #d4d4d4;
+            --fg-2: #cccccc;
+            --fg-muted: #888;
+            --border-2: #444;
+            --accent: #0e639c;
+        }
+        body {
+            margin: 0;
+            padding: 24px;
+            font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+        }
+        h1 { margin-top: 0; font-size: 1.2rem; }
+        h2 { margin: 1.5rem 0 0.5rem; font-size: 0.95rem; color: var(--fg-muted); }
+        .demo-row {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 24px;
+            padding: 12px;
+            background: var(--bg-2);
+            border-radius: 8px;
+        }
+        .demo-label {
+            font-size: 0.85rem;
+            color: var(--fg-muted);
+        }
+        .demo-log {
+            font-family: ui-monospace, monospace;
+            font-size: 0.78rem;
+            color: var(--fg-muted);
+            min-height: 1.2em;
+        }
+
+        /* ─── Paste the diff-approval CSS verbatim from index.html so the
+               demo matches what the live app renders. Keep in sync. ─── */
+        .ai-diff-wrapper {
+            align-self: stretch;
+            border: 2px solid #0e639c;
+            border-radius: 6px;
+            overflow: hidden;
+            font-size: 0.78rem;
+            display: flex;
+            flex-direction: column;
+            max-height: 55vh;
+        }
+        .ai-diff-wrapper.ai-diff-accepted { border-color: #4caf50; }
+        .ai-diff-wrapper.ai-diff-rejected { border-color: #f14c4c; opacity: 0.6; }
+        .ai-diff-header {
+            padding: 0.4rem 0.7rem;
+            background: rgba(14, 99, 156, 0.18);
+            border-bottom: 1px solid var(--border-2);
+            font-size: 0.78rem;
+            color: var(--fg);
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+        .ai-diff {
+            margin: 0;
+            padding: 0.4rem 0.6rem;
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.76rem;
+            line-height: 1.5;
+            background: var(--bg);
+            overflow-x: auto;
+            overflow-y: auto;
+            flex: 1 1 auto;
+            min-height: 60px;
+        }
+        .ai-diff-line { display: block; }
+        .ai-diff-add    { color: #4caf50; background: rgba(76, 175, 80, 0.08); }
+        .ai-diff-remove { color: #f14c4c; background: rgba(241, 76, 76, 0.08); text-decoration: line-through; opacity: 0.8; }
+        .ai-diff-same   { color: var(--fg-muted); }
+        .ai-diff-empty {
+            padding: 0.8rem 0.6rem;
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.78rem;
+            color: var(--fg-muted);
+            background: var(--bg);
+            font-style: italic;
+            text-align: center;
+        }
+        .ai-diff-actions {
+            display: flex;
+            gap: 0.6rem;
+            padding: 0.6rem 0.7rem;
+            background: var(--bg-2);
+            border-top: 1px solid var(--border-2);
+            flex-shrink: 0;
+        }
+        .ai-diff-apply {
+            padding: 0.4rem 1rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            background: #0e639c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            min-width: 80px;
+        }
+        .ai-diff-apply:hover:not(:disabled) { background: #1177bb; }
+        .ai-diff-apply:disabled { opacity: 0.5; cursor: default; }
+        .ai-diff-reject {
+            padding: 0.4rem 1rem;
+            font-size: 0.85rem;
+            background: transparent;
+            color: var(--fg);
+            border: 1px solid var(--fg-muted);
+            border-radius: 4px;
+            min-width: 80px;
+            cursor: pointer;
+        }
+        .ai-diff-reject:hover:not(:disabled) {
+            color: var(--fg);
+            border-color: var(--fg);
+        }
+        .ai-diff-reject:disabled { opacity: 0.5; cursor: default; }
+        .ai-approval-hint {
+            align-self: flex-start;
+            font-size: 0.72rem;
+            color: #cca700;
+            padding: 0.15rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Diff Approval — Visual Demo</h1>
+    <p style="color: var(--fg-muted); max-width: 700px;">
+        Each card mounts the real <code>mountDiffApproval()</code> from
+        <code>src/ai/ui/diff-approval.ts</code> against a different scenario.
+        Click Apply / Reject — the log below each card prints which callback fired.
+    </p>
+
+    <div id="root"></div>
+
+    <script type="module">
+        import { mountDiffApproval } from './src/ai/ui/diff-approval.ts';
+
+        const root = document.getElementById('root');
+
+        const SCENARIOS = [
+            {
+                label: 'Simple single-line edit',
+                path: 'main.fbasic',
+                old: 'function greet()\n  print "hello"\nend function',
+                new: 'function greet()\n  print "world"\nend function',
+            },
+            {
+                label: 'Insert two lines into the middle',
+                path: 'main.fbasic',
+                old: 'print "1"\nprint "2"\nprint "3"',
+                new: 'print "1"\nprint "1.5"\nprint "1.75"\nprint "2"\nprint "3"',
+            },
+            {
+                label: 'CRLF source + LF newText (this used to phantom-diff)',
+                path: 'main.fbasic',
+                // Use String.raw + an actual \r\n so the file genuinely uses CRLF
+                old: 'L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7\r\nL8\r\nL9\r\nL10\r\n',
+                new: 'L1\nL2\nL3\nL4\nL5\nL6\nL7\nNEW LINE INSERTED\nL8\nL9\nL10\n',
+            },
+            {
+                label: 'New file creation',
+                path: 'lib/util.fade',
+                old: '',
+                new: 'function add(a, b)\n  return a + b\nend function\n\nfunction sub(a, b)\n  return a - b\nend function',
+            },
+            {
+                label: 'No-op edit (content unchanged)',
+                path: 'main.fbasic',
+                old: 'print "1"\nprint "2"',
+                new: 'print "1"\nprint "2"',
+            },
+            {
+                label: 'Large diff (200 lines added)',
+                path: 'huge.fbasic',
+                old: Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join('\n'),
+                new: Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join('\n'),
+            },
+        ];
+
+        for (const scenario of SCENARIOS) {
+            const card = document.createElement('div');
+            card.className = 'demo-row';
+
+            const label = document.createElement('div');
+            label.className = 'demo-label';
+            label.textContent = scenario.label;
+            card.appendChild(label);
+
+            const container = document.createElement('div');
+            container.style.display = 'flex';
+            container.style.flexDirection = 'column';
+            container.style.gap = '4px';
+            card.appendChild(container);
+
+            const log = document.createElement('div');
+            log.className = 'demo-log';
+            card.appendChild(log);
+
+            mountDiffApproval({
+                container,
+                path: scenario.path,
+                oldContent: scenario.old,
+                newContent: scenario.new,
+                onApprove: () => { log.textContent = '✓ onApprove() fired'; },
+                onReject:  () => { log.textContent = '✗ onReject() fired'; },
+            });
+
+            root.appendChild(card);
+        }
+    </script>
+</body>
+</html>

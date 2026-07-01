@@ -1,0 +1,7 @@
+{
+  "_comment": "Pinned versions the Playground consumes in 'package' runtime mode (see scripts/lib/sources.mjs). Bump these to move to a newer published Fade/MonoGame web runtime. Env vars FADE_EXPORT_WEB_VERSION / FADE_LIB_WEB_VERSION / FADE_EXPORT_MONOGAME_VERSION / FADE_MONOGAME_VERSION override individual entries.",
+  "exportWeb": "0.1.2.1",
+  "libWeb": "0.1.2.1",
+  "exportMonoGame": "0.0.2.1",
+  "monogame": "0.0.2.1"
+}

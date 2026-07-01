@@ -1,0 +1,34 @@
+# Repo-wide ignores. Each subproject (Playground/, ghostBot/, oauth-proxy/)
+# also has its own .gitignore covering build outputs — node_modules/, dist/,
+# public/runtime/ (generated web runtimes), src-tauri/target/, .wrangler/, etc.
+# The entries here are a safety net + OS/editor noise.
+
+# Dependencies / build output (defensive; also covered per-project)
+node_modules/
+dist/
+.vite/
+
+# Generated web runtimes (rebuilt by Playground `npm run build:runtime`)
+Playground/public/runtime/
+Playground/public/monogame-runtime/
+
+# Rust / Tauri build output
+**/src-tauri/target/
+**/src-tauri/gen/schemas/
+
+# Secrets / local env — never commit
+.env
+.env.*
+*.local
+.dev.vars
+.wrangler/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vs/
+*.swp
