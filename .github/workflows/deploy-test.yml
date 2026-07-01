@@ -1,0 +1,16 @@
+# Auto-deploy the Playground to the TEST url on every push to main:
+#   https://tests.fade-playground.pages.dev
+# (Also runnable manually from the Actions tab.)
+name: Deploy (test)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-url:
+    uses: ./.github/workflows/_deploy-pages.yml
+    with:
+      branch: tests   # preview alias → tests.fade-playground.pages.dev
+    secrets: inherit

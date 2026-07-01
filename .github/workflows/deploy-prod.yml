@@ -1,0 +1,17 @@
+# Manual release of the Playground to PRODUCTION. Trigger from the Actions tab
+# (Actions → "Deploy (production)" → Run workflow).
+#
+# Deploys with branch=main, which Cloudflare treats as a production deployment
+# ONLY if `main` is the fade-playground project's configured production branch.
+# If your production branch is named differently, change `branch:` below.
+name: Deploy (production)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prod:
+    uses: ./.github/workflows/_deploy-pages.yml
+    with:
+      branch: main
+    secrets: inherit

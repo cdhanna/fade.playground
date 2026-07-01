@@ -1,0 +1,75 @@
+# Build + test the three projects on push / PR. No .NET or Wine needed: the web
+# runtimes are pulled from published nupkgs in 'package' mode (pure Node).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  playground:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: Playground/package-lock.json
+      - name: Install
+        working-directory: Playground
+        run: npm ci
+      - name: Build runtimes (package mode)
+        working-directory: Playground
+        env:
+          FADE_RUNTIME_MODE: package
+        run: |
+          npm run build:runtime
+          npm run build:monogame-runtime
+      - name: Typecheck + build
+        working-directory: Playground
+        run: npm run build
+      - name: Unit / integration tests
+        working-directory: Playground
+        run: npx vitest run
+      # Playwright probes (scripts/probe-*.mjs) need a running dev server and a
+      # real browser; they're not part of CI. Run them locally per CLAUDE.md.
+
+  ghostbot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ghostBot/package-lock.json
+      - name: Install
+        working-directory: ghostBot
+        run: npm ci
+      - name: Tests
+        working-directory: ghostBot
+        run: npm test
+      # The full Tauri (Rust) desktop build is exercised by ghostbot-release.yml,
+      # not here — it's slow and platform-specific.
+
+  oauth-proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: oauth-proxy/package-lock.json
+      - name: Install
+        working-directory: oauth-proxy
+        run: npm ci
+      - name: Typecheck
+        working-directory: oauth-proxy
+        run: npm run typecheck

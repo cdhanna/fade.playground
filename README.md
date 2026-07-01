@@ -69,8 +69,27 @@ published runtimes — a standalone checkout just works.
 - **Playwright probes:** `cd Playground && node scripts/probe-*.mjs` (needs `npm run dev` running)
 - **ghostBot:** `cd ghostBot && npm test`
 
+## CI & deploy (GitHub Actions)
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci.yml` | push to `main`, PRs | Build + test the Playground (package-mode runtimes, `tsc`, `vitest`), ghostBot (`npm test`), and oauth-proxy (`typecheck`). |
+| `deploy-test.yml` | push to `main` (auto) + manual | Deploy to the test alias → `https://tests.fade-playground.pages.dev`. |
+| `deploy-prod.yml` | manual only | Deploy to the production Pages branch. |
+| `_deploy-pages.yml` | reusable | Shared build + `wrangler pages deploy` used by both deploy workflows. |
+| `ghostbot-release.yml` | manual + `ghostbot-v*` tags | Build the ghostBot Tauri app (macOS + Windows) → GitHub Release. |
+
+Deploys build the web runtimes in **package mode** (no .NET on the runner) and
+`wrangler pages deploy dist --project-name=fade-playground`.
+
+**Required repo secrets** (Settings → Secrets → Actions):
+
+- `CLOUDFLARE_API_TOKEN` — token with *Cloudflare Pages: Edit*
+- `CLOUDFLARE_ACCOUNT_ID` — the account owning the `fade-playground` project
+- ghostBot signing (optional; unset = unsigned build): `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`
+
 ## Releasing
 
 The Playground releases on its own cadence. Bump the runtime it ships by editing
 `Playground/runtime-versions.json` (or the `FADE_*_VERSION` env) to a newer
-published Fade / MonoGame web-runtime version, then build in `package` mode.
+published Fade / MonoGame web-runtime version, then run **Deploy (production)**.

@@ -1,0 +1,64 @@
+# Reusable: build the Playground and deploy it to Cloudflare Pages.
+# Called by deploy-test.yml (preview alias) and deploy-prod.yml (production).
+#
+# The runtimes are built in 'package' mode (pure Node: download the pinned
+# FadeBasic.Export.* nupkgs and extract them — no .NET SDK on the runner). Bump
+# what ships via Playground/runtime-versions.json.
+#
+# Required repo secrets:
+#   CLOUDFLARE_API_TOKEN   — token with "Cloudflare Pages: Edit" on the account
+#   CLOUDFLARE_ACCOUNT_ID  — the account that owns the fade-playground project
+name: _deploy-pages
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: >-
+          Cloudflare Pages branch. The project's production branch deploys to
+          production; any other name becomes a preview at
+          <branch>.fade-playground.pages.dev.
+        required: true
+        type: string
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: Playground/package-lock.json
+
+      - name: Install dependencies
+        working-directory: Playground
+        run: npm ci
+
+      - name: Build web + MonoGame runtimes (package mode)
+        working-directory: Playground
+        env:
+          FADE_RUNTIME_MODE: package
+        run: |
+          npm run build:runtime
+          npm run build:monogame-runtime
+
+      - name: Build site
+        working-directory: Playground
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages (branch=${{ inputs.branch }})
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: Playground
+          command: pages deploy dist --project-name=fade-playground --branch=${{ inputs.branch }} --commit-dirty=true
