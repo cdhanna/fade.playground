@@ -34,6 +34,17 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
         {
+            version: '0.5.0',
+            date: '2026-07-02',
+            added: [
+                'Changelog tab in help section.'
+            ],
+            changed: [
+                'Debug Console and Output tabs have been combined.',
+                'Changelog popup only shows most recent changes. '
+            ],
+        },
+        {
             version: '0.4.2',
             date: '2026-06-25',
             added: [

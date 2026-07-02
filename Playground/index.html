@@ -3498,25 +3498,7 @@
         }
         .debug-var-children { padding-left: 0.9rem; }
 
-        /* ─── Debug Console (bottom panel) ──────────────────────────── */
-        .debug-console-host {
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-            height: 100%;
-            background: var(--bg);
-        }
-        #debug-repl-output {
-            margin: 0;
-            padding: 0.3rem 0.9rem;
-            flex: 1;
-            overflow: auto;
-            white-space: pre-wrap;
-            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-            font-size: 0.78rem;
-            color: var(--fg);
-            background: var(--bg);
-        }
+        /* ─── REPL input row (merged into the Output panel) ──────────── */
         .debug-repl-input-row {
             display: flex;
             align-items: center;
@@ -4068,6 +4050,43 @@
             font-size: 0.82rem;
         }
         .changelog-dismiss:hover { background: var(--bg-2); border-color: var(--fg-muted); }
+        .changelog-foot .grow { flex: 1; }
+        .changelog-view-full {
+            background: transparent;
+            color: #4cb0ff;
+            border: 1px solid transparent;
+            padding: 0.3rem 0.6rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font: inherit;
+            font-size: 0.82rem;
+        }
+        .changelog-view-full[hidden] { display: none; }
+        .changelog-view-full:hover { color: #8bcaff; text-decoration: underline; }
+
+        /* ─── Changelog Help tab ─────────────────────────────────────────── */
+        /* The Changelog tab reuses the Help panel's TOC rail (#help-toc) and
+           body (#help-body). Each TOC row is a version; the body shows the
+           full changelog (shared .changelog-* entry classes, same as the
+           "What's new" popup). These rules only tune the TOC rows — the
+           version + date layout — on top of the base .help-toc-item look. */
+        .help-toc-item.changelog-toc-item {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            padding: 0.28rem 0.9rem 0.28rem 1.1rem;
+        }
+        .changelog-toc-version {
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.78rem;
+            color: var(--fg);
+        }
+        .changelog-toc-date {
+            font-size: 0.68rem;
+            color: var(--fg-muted);
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            margin-left: auto;
+        }
 
         /* ─── AI Chat panel ──────────────────────────────────────────────── */
         #ai-chat-pane {
@@ -5471,6 +5490,13 @@
                 <div id="output" class="output-body">
                     <div class="output-line dim">(not yet run)</div>
                 </div>
+                <!-- REPL input, merged in from the former Debug Console.
+                     Disabled unless a debug session is paused at a frame;
+                     submitted expressions + results echo into #output above. -->
+                <div class="debug-repl-input-row">
+                    <span class="debug-repl-prompt">›</span>
+                    <input id="debug-repl-input" type="text" placeholder="Eval expression (debug session)…" disabled />
+                </div>
             </div>
         </div>
 
@@ -5542,16 +5568,9 @@
             </div>
         </div>
 
-        <!-- Debug Console: REPL output + input (VSCode bottom-panel "Debug Console"). -->
-        <div class="panel-cell" data-panel="debug-console">
-            <div class="debug-console-host">
-                <pre id="debug-repl-output"></pre>
-                <div class="debug-repl-input-row">
-                    <span class="debug-repl-prompt">›</span>
-                    <input id="debug-repl-input" type="text" placeholder="Eval expression…" disabled />
-                </div>
-            </div>
-        </div>
+        <!-- Debug Console has been merged into the Output panel: the REPL
+             input row now lives inside #output-pane and its output streams
+             into #output. No standalone panel-cell remains. -->
 
         <!-- Game panel. Hosts two sub-surfaces and shows one at a time
              based on the active project type:
@@ -5692,6 +5711,7 @@
                     <button class="help-tab active" data-tab="commands" role="tab" aria-selected="true">Commands</button>
                     <button class="help-tab" data-tab="language" role="tab" aria-selected="false">Language</button>
                     <button class="help-tab" data-tab="playground" role="tab" aria-selected="false">Playground</button>
+                    <button class="help-tab" data-tab="changelog" role="tab" aria-selected="false">Changelog</button>
                 </div>
                 <div id="help-split">
                     <nav id="help-toc"></nav>
@@ -5840,6 +5860,8 @@
             </div>
             <div class="changelog-body" id="changelog-body"></div>
             <div class="changelog-foot">
+                <button type="button" class="changelog-view-full" id="changelog-view-full" hidden>View full changelog</button>
+                <span class="grow"></span>
                 <button type="button" class="changelog-dismiss" id="changelog-dismiss">Got it</button>
             </div>
         </div>

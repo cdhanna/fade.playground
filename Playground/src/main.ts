@@ -135,7 +135,7 @@ import { mountAiChat, mountAiModels } from './ai-chat';
 import { monacoDiagnosticsProvider } from './ai/adapters/monaco-diagnostics';
 import { createProjectAwareLspEditValidator } from './ai/adapters/lsp-validate-edit';
 import { PLAYGROUND_VERSION } from './changelog';
-import { maybeShowChangelogPopup, showFullChangelog } from './version-popup';
+import { maybeShowChangelogPopup, setFullChangelogOpener } from './version-popup';
 import {
     extractInsIndex,
     hideCrashOverlay,
@@ -5736,7 +5736,7 @@ async function bootstrap() {
     // expected default that's missing.
     const KNOWN_COMPONENTS = new Set([
         'workspace', 'editor', 'debug', 'search', 'settings',
-        'output', 'problems', 'tests', 'debug-console',
+        'output', 'problems', 'tests',
         'game', 'help', 'diagnostics',
         // Dynamic — created on demand by the markdown preview button.
         'markdown-preview',
@@ -5831,10 +5831,6 @@ async function bootstrap() {
                 position: { referencePanel: dock.getPanel('workspace')?.id ?? 'workspace', direction: 'within' },
                 renderer: RENDER_ALWAYS, title: 'Tests',
             });
-            addMissing('debug-console', {
-                position: { referencePanel: bottomRef, direction: 'within' },
-                renderer: RENDER_ALWAYS, title: 'Debug Console',
-            });
             addMissing('game', {
                 position: { referencePanel: ref?.id ?? 'editor', direction: 'right' },
                 renderer: RENDER_ALWAYS, title: 'Game',
@@ -5919,7 +5915,8 @@ async function bootstrap() {
             position: { referencePanel: workspacePanel.id, direction: 'within' },
             renderer: RENDER_ALWAYS,
         });
-        // Bottom tab group: Output / Problems / Debug Console.
+        // Bottom tab group: Output / Problems. (The former Debug Console
+        // REPL is merged into the Output panel.)
         // Default height kept modest — the editor + game canvas should
         // dominate the viewport, with the bottom panel showing a few lines
         // of output by default. Users can drag the splitter taller when
@@ -5938,13 +5935,6 @@ async function bootstrap() {
             id: 'problems',
             component: 'problems',
             title: 'Problems',
-            position: { referencePanel: outputPanel.id, direction: 'within' },
-            renderer: RENDER_ALWAYS,
-        });
-        dock.addPanel({
-            id: 'debug-console',
-            component: 'debug-console',
-            title: 'Debug Console',
             position: { referencePanel: outputPanel.id, direction: 'within' },
             renderer: RENDER_ALWAYS,
         });
@@ -8202,6 +8192,14 @@ async function bootstrap() {
         try { dockApi.getPanel('help')?.api?.setActive(); } catch { /* ignore */ }
     }
 
+    // The "What's new" popup's "View full changelog" button opens the
+    // Help panel and switches it to the Changelog tab (the full history
+    // lives there — see help.ts).
+    setFullChangelogOpener(() => {
+        ensureHelpPanelOpen();
+        helpCtl.showChangelog();
+    });
+
     // Open the Help tab + focus a specific command. Used by the hover
     // provider's "View in Help →" link, the right-click context menu
     // action, the Ctrl/Cmd-click handler in the editor, and external
@@ -8395,12 +8393,17 @@ async function bootstrap() {
     // Playground app version — surfaced in Diagnostics and used to
     // drive the "What's new" popup. The version row is clickable so
     // the user can re-open the full changelog without waiting for the
-    // next bump.
+    // next bump — it opens the Help panel's Changelog tab (the single
+    // home for the full history), same destination as the popup's
+    // "View full changelog" button.
     {
         const versionEl = document.getElementById('diag-playground-version');
         if (versionEl) {
             versionEl.textContent = PLAYGROUND_VERSION;
-            versionEl.addEventListener('click', () => showFullChangelog());
+            versionEl.addEventListener('click', () => {
+                ensureHelpPanelOpen();
+                helpCtl.showChangelog();
+            });
         }
         maybeShowChangelogPopup();
     }
@@ -8461,7 +8464,6 @@ async function bootstrap() {
         { id: 'output',        label: 'Output' },
         { id: 'problems',      label: 'Problems' },
         { id: 'tests',         label: 'Tests' },
-        { id: 'debug-console', label: 'Debug Console' },
         { id: 'game',          label: 'Game' },
         { id: 'help',          label: 'Help' },
         { id: 'diagnostics',   label: 'Diagnostics' },
@@ -8497,7 +8499,7 @@ async function bootstrap() {
     }
     const SEMANTIC_LAYOUTS: SemanticLayoutDef[] = [
         { id: 'debug', label: 'Debug Mode', icon: 'codicon-debug-alt',
-          focus: ['debug', 'game', 'debug-console'] },
+          focus: ['debug', 'game', 'output'] },
         { id: 'test',  label: 'Test Mode',  icon: 'codicon-beaker',
           focus: ['tests', 'game'] },
     ];
@@ -10327,7 +10329,6 @@ async function bootstrap() {
     const debugFramesEmpty = document.getElementById('debug-frames-empty')!;
     const debugVarsTree = document.getElementById('debug-vars-tree')!;
     const debugVarsEmpty = document.getElementById('debug-vars-empty')!;
-    const debugReplOutput = document.getElementById('debug-repl-output')!;
     const debugReplInput = document.getElementById('debug-repl-input') as HTMLInputElement;
     // Watch + Breakpoints section refs (consolidated Debug panel).
     const watchListEl = document.getElementById('watch-list')!;
@@ -11307,11 +11308,14 @@ async function bootstrap() {
     });
     watchInput.addEventListener('blur', closeWatchInput);
 
+    // REPL echo now shares the Output stream (the Debug Console was merged
+    // into the Output panel). Input expressions render as an info line with
+    // the prompt glyph; results plain; errors in the error color.
     function appendReplLine(text: string, kind: 'in' | 'out' | 'err' = 'out') {
         if (!text) return;
-        const prefix = kind === 'in' ? '› ' : kind === 'err' ? '! ' : '  ';
-        debugReplOutput.textContent += prefix + text + '\n';
-        debugReplOutput.scrollTop = debugReplOutput.scrollHeight;
+        if (kind === 'in') appendOutputLine('› ' + text, 'info');
+        else if (kind === 'err') appendOutputLine(text, 'error');
+        else appendOutputLine(text, 'plain');
     }
 
     // DebugStackFrame from C# only carries lineNumber/colNumber/name — frames
@@ -11875,7 +11879,7 @@ async function bootstrap() {
                     ? `[Internal] ${baseText}`
                     : baseText;
                 appendReplLine(replText, 'err');
-                revealPanel('debug-console');
+                revealPanel('output');
 
                 // Finalize a debug-test row immediately — the test has
                 // failed regardless of whether the user lingers in the
@@ -12134,7 +12138,6 @@ async function bootstrap() {
         // Debug Mode".
         try { applySemanticLayout('debug'); } catch (e) { console.warn('[fade] applySemanticLayout(debug) failed', e); }
         clearOutput();
-        debugReplOutput.textContent = '';
         setDebugStatus('starting', 'paused');
         // Mark a session as starting so refreshRunButtons disables Run +
         // Debug. Cleared on the failure path below; on success the

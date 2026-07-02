@@ -15,6 +15,8 @@ import {
     helpTabForSource,
     normalizeHeadingMatch,
 } from './ai/rag/doc-citation-links';
+import { CHANGELOG } from './changelog';
+import { renderChangelogEntry } from './version-popup';
 
 export interface CommandDocEntry {
     name: string;
@@ -226,6 +228,9 @@ export interface HelpController {
     getQuery(): string;
     /** Jump to a RAG citation (FadeBook/Language.md, etc.) in this panel. */
     openDocCitation(source: string, heading: string): Promise<boolean>;
+    /** Switch the panel to the Changelog tab (full release history). Used
+     *  by the "What's new" popup's "View full changelog" button. */
+    showChangelog(): void;
 }
 
 /** Optional services the help panel uses if provided. Today: a tokenizer
@@ -385,8 +390,12 @@ interface ScoredResult {
 // Tabs surface different doc bodies inside the same help panel:
 //   - 'commands': the LSP-derived command catalog (existing behavior).
 //   - 'language' / 'playground': static markdown fetched from /docs/.
-// New tabs slot in by extending this union + STATIC_DOCS.
-type Tab = 'commands' | 'language' | 'playground';
+//   - 'changelog': the in-memory CHANGELOG, rendered in full with a
+//     version TOC (no fetch, no per-section swap — see renderChangelog*).
+// New static-doc tabs slot in by extending DocTab + STATIC_DOCS; the
+// changelog tab is handled specially and is deliberately NOT a DocTab.
+type DocTab = 'language' | 'playground';
+type Tab = 'commands' | DocTab | 'changelog';
 
 interface StaticDocConfig {
     /** Fetched lazily on first activation; cached for the session. */
@@ -395,7 +404,7 @@ interface StaticDocConfig {
     label: string;
 }
 
-const STATIC_DOCS: Record<Exclude<Tab, 'commands'>, StaticDocConfig> = {
+const STATIC_DOCS: Record<DocTab, StaticDocConfig> = {
     language:   { url: '/docs/Language.md',   label: 'Language reference' },
     playground: { url: '/docs/Playground.md', label: 'Playground guide' },
 };
@@ -487,7 +496,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
     // main.ts feed user-typed words through it).
     let byNameLower: Map<string, string> = new Map();
     let selectedName: string | null = null;
-    const docs: Record<Exclude<Tab, 'commands'>, StaticDocState> = {
+    const docs: Record<DocTab, StaticDocState> = {
         language:   { sections: undefined, failed: false, selectedSlug: null, selectedSubSlug: null },
         playground: { sections: undefined, failed: false, selectedSlug: null, selectedSubSlug: null },
     };
@@ -495,7 +504,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
     // what they want to browse. A live search query bypasses these so
     // filtered hits are always visible regardless of expansion.
     const expandedCommandGroups = new Set<string>();
-    const expandedDocSections: Record<Exclude<Tab, 'commands'>, Set<string>> = {
+    const expandedDocSections: Record<DocTab, Set<string>> = {
         language: new Set(),
         playground: new Set(),
     };
@@ -503,6 +512,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
     function renderToc() {
         m.toc.innerHTML = '';
         if (activeTab === 'commands') { renderCommandsToc(); return; }
+        if (activeTab === 'changelog') { renderChangelogToc(); return; }
         renderDocToc(activeTab);
     }
 
@@ -564,7 +574,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         renderToc();
     }
 
-    function renderDocToc(tab: Exclude<Tab, 'commands'>) {
+    function renderDocToc(tab: DocTab) {
         const state = docs[tab];
         if (state.sections === undefined) {
             const loading = document.createElement('div');
@@ -637,7 +647,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         }
     }
 
-    function toggleDocSection(tab: Exclude<Tab, 'commands'>, slug: string): void {
+    function toggleDocSection(tab: DocTab, slug: string): void {
         const set = expandedDocSections[tab];
         if (set.has(slug)) set.delete(slug);
         else set.add(slug);
@@ -647,6 +657,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
 
     function renderBody() {
         if (activeTab === 'commands') { renderCommandsBody(); return; }
+        if (activeTab === 'changelog') { renderChangelogBody(); return; }
         renderDocBody(activeTab);
     }
 
@@ -693,7 +704,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         m.body.scrollTop = 0;
     }
 
-    function renderDocBody(tab: Exclude<Tab, 'commands'>) {
+    function renderDocBody(tab: DocTab) {
         const state = docs[tab];
         const cfg = STATIC_DOCS[tab];
         if (state.sections === undefined) {
@@ -757,6 +768,68 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         }
     }
 
+    // ── Changelog tab ───────────────────────────────────────────────────
+    // Behaves like Commands / the static docs: the TOC lists versions and
+    // clicking one swaps the body to just that release's entry (one per
+    // page), rather than long-scrolling the whole history. Defaults to the
+    // newest version. `selectedChangelogVersion === null` means "no pick
+    // yet" → fall back to the newest entry.
+    let selectedChangelogVersion: string | null = null;
+
+    function currentChangelogVersion(): string | null {
+        if (CHANGELOG.length === 0) return null;
+        const picked = CHANGELOG.find(e => e.version === selectedChangelogVersion);
+        return (picked ?? CHANGELOG[0]).version;
+    }
+
+    function renderChangelogToc() {
+        if (CHANGELOG.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'help-toc-empty';
+            empty.textContent = 'No changelog entries.';
+            m.toc.append(empty);
+            return;
+        }
+        const active = currentChangelogVersion();
+        for (const entry of CHANGELOG) {
+            const item = document.createElement('div');
+            // Reuse .help-toc-item for the base row look (hover/active);
+            // .changelog-toc-item + -leaf tune the version/date layout.
+            item.className = 'help-toc-item help-toc-leaf changelog-toc-item'
+                + (entry.version === active ? ' active' : '');
+            item.dataset.version = entry.version;
+            const ver = document.createElement('span');
+            ver.className = 'changelog-toc-version';
+            ver.textContent = entry.version;
+            const date = document.createElement('span');
+            date.className = 'changelog-toc-date';
+            date.textContent = entry.date;
+            item.append(ver, date);
+            item.addEventListener('click', () => selectChangelogVersion(entry.version));
+            m.toc.append(item);
+        }
+    }
+
+    function renderChangelogBody() {
+        m.body.innerHTML = '';
+        const version = currentChangelogVersion();
+        if (version === null) {
+            m.body.innerHTML = '<p class="help-empty">No changelog entries.</p>';
+            return;
+        }
+        const entry = CHANGELOG.find(e => e.version === version)!;
+        // Shared with the "What's new" popup so both render identically.
+        m.body.appendChild(renderChangelogEntry(entry));
+        m.body.scrollTop = 0;
+    }
+
+    // TOC click → show that version's page (re-renders both panes).
+    function selectChangelogVersion(version: string): void {
+        selectedChangelogVersion = version;
+        renderToc();
+        renderBody();
+    }
+
     function selectCommand(name: string, scrollIntoView: boolean): boolean {
         const entry = byName.get(name);
         if (!entry) return false;
@@ -782,7 +855,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         return true;
     }
 
-    function selectDocSection(tab: Exclude<Tab, 'commands'>, slug: string): void {
+    function selectDocSection(tab: DocTab, slug: string): void {
         const state = docs[tab];
         state.selectedSlug = slug;
         state.selectedSubSlug = null; // page change clears any in-page anchor
@@ -793,7 +866,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         renderBody();
     }
 
-    function selectDocSubheading(tab: Exclude<Tab, 'commands'>, sectionSlug: string, subSlug: string): void {
+    function selectDocSubheading(tab: DocTab, sectionSlug: string, subSlug: string): void {
         const state = docs[tab];
         // Make sure the parent is expanded so the sub-item the user
         // landed on is visible in the TOC after we re-render.
@@ -809,7 +882,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         renderBody();
     }
 
-    async function ensureDocLoaded(tab: Exclude<Tab, 'commands'>): Promise<void> {
+    async function ensureDocLoaded(tab: DocTab): Promise<void> {
         const state = docs[tab];
         if (state.sections !== undefined) return; // already loaded (or failed once — don't retry on tab toggles)
         const cfg = STATIC_DOCS[tab];
@@ -921,7 +994,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
             btn.classList.toggle('active', isActive);
             btn.setAttribute('aria-selected', String(isActive));
         }
-        if (tab !== 'commands') {
+        if (tab !== 'commands' && tab !== 'changelog') {
             void ensureDocLoaded(tab);
         }
         renderToc();
@@ -973,11 +1046,13 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         // resolves to a known section or subheading; everything else
         // (commands tab, unknown slug, fully-qualified URL) falls through
         // to the browser's default behavior.
-        if (activeTab === 'commands') return;
+        // Only static-doc tabs use in-page #slug nav; commands + changelog
+        // bodies have no doc-section index to resolve against.
+        if (activeTab === 'commands' || activeTab === 'changelog') return;
         if (!href.startsWith('#') || href.startsWith('#fade-')) return;
         const slug = decodeURIComponent(href.slice(1));
         if (!slug) return;
-        const tab = activeTab;
+        const tab: DocTab = activeTab;
         const state = docs[tab];
         if (!state.sections) return;
         // Section match wins over sub match — if a doc has both a section
@@ -1117,6 +1192,7 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
         },
         getQuery: () => m.search.value,
         openDocCitation,
+        showChangelog: () => switchTab('changelog'),
     };
 
     // ── global search ───────────────────────────────────────────────────

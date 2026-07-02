@@ -3,13 +3,16 @@
 // On every boot, maybeShowChangelogPopup() compares the active
 // PLAYGROUND_VERSION against the version this browser saw last (stored
 // in localStorage under LAST_SEEN_KEY). If they differ, the modal
-// renders every CHANGELOG entry NEWER than the last-seen version and
-// commits the new pointer on dismiss. First-ever loads (no stored
-// pointer) are silent — we set the pointer to the active version so
-// the popup only fires for real upgrades, not for new users.
+// renders just the latest release (with a "View full changelog" button
+// for the rest) and commits the new pointer on dismiss. First-ever
+// loads (no stored pointer) are silent — we set the pointer to the
+// active version so the popup only fires for real upgrades, not for
+// new users.
 //
-// showChangelogModal() also powers the Diagnostics-panel version row
-// click, where the user has explicitly asked to see the full history.
+// The full history now lives in the Help panel's Changelog tab; both the
+// popup's "View full changelog" button and the Diagnostics version row
+// route there (see setFullChangelogOpener + main.ts), so this file no
+// longer renders the complete list itself.
 
 import { marked } from 'marked';
 import {
@@ -68,6 +71,16 @@ function entriesNewerThan(lastSeen: string): ChangelogEntry[] {
     return CHANGELOG.slice(0, idx);
 }
 
+// Optional callback wired from main.ts. When set, the "What's new"
+// popup shows a "View full changelog" button that dismisses the modal
+// and invokes this — main.ts opens/activates the changelog dock panel.
+// Kept as a module-level hook so version-popup stays free of any
+// dockview/panel knowledge.
+let openFullChangelog: (() => void) | null = null;
+export function setFullChangelogOpener(fn: (() => void) | null): void {
+    openFullChangelog = fn;
+}
+
 export function maybeShowChangelogPopup(): void {
     const lastSeen = readLastSeen();
     if (lastSeen === null) {
@@ -85,18 +98,75 @@ export function maybeShowChangelogPopup(): void {
         writeLastSeen(PLAYGROUND_VERSION);
         return;
     }
-    showChangelogModal(entries, lastSeen);
+    // Surface only the latest release in the popup — however many
+    // versions the user skipped, the "What's new" card stays a single
+    // entry and the "View full changelog" button links to the rest.
+    // (entriesNewerThan is still what gates whether we pop at all.)
+    showChangelogModal([CHANGELOG[0]], lastSeen);
+}
+
+// Build the DOM for one changelog entry (version header + grouped
+// bullet lists). Shared by the "What's new" modal and the full
+// changelog dock panel so both render entries identically. The
+// returned <section> carries `data-version` so callers can locate a
+// specific entry (e.g. to scroll it into view) without relying on a
+// global element id that could collide across the two renderers.
+export function renderChangelogEntry(entry: ChangelogEntry): HTMLElement {
+    const section = document.createElement('section');
+    section.className = 'changelog-entry';
+    section.dataset.version = entry.version;
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'changelog-entry-title';
+    const versionEl = document.createElement('span');
+    versionEl.className = 'changelog-entry-version';
+    versionEl.textContent = entry.version;
+    const dateEl = document.createElement('span');
+    dateEl.className = 'changelog-entry-date';
+    dateEl.textContent = entry.date;
+    titleRow.append(versionEl, dateEl);
+    section.appendChild(titleRow);
+
+    // Iterate categories in CHANGELOG_CATEGORIES order so the
+    // rendered layout always reads Added → Changed → Fixed →
+    // Removed → Notes regardless of object-literal key order.
+    for (const cat of CHANGELOG_CATEGORIES) {
+        const items = entry[cat.key];
+        if (!items || items.length === 0) continue;
+
+        const catBlock = document.createElement('div');
+        catBlock.className = 'changelog-cat';
+
+        const catTitle = document.createElement('div');
+        catTitle.className = 'changelog-cat-title';
+        catTitle.textContent = cat.label;
+        catBlock.appendChild(catTitle);
+
+        const list = document.createElement('ul');
+        for (const item of items) {
+            const li = document.createElement('li');
+            // innerHTML is fed marked-parsed-then-scrubbed
+            // output, never raw user input. See scrubInlineHtml.
+            li.innerHTML = renderBulletMarkdown(item);
+            list.appendChild(li);
+        }
+        catBlock.appendChild(list);
+        section.appendChild(catBlock);
+    }
+
+    return section;
 }
 
 // Render `entries` into the static #changelog-overlay markup and wire
-// dismiss handlers. `previous` is the version the user was last on, or
-// null when the user manually opened the modal (in which case the
-// subtitle just shows the active version).
+// dismiss handlers. `previous` is the version the user was last on
+// (drives the "updated from X" subtitle); pass null to just show the
+// active version with no "View full changelog" button.
 export function showChangelogModal(entries: ChangelogEntry[], previous: string | null): void {
     const overlay = document.getElementById('changelog-overlay');
     const body = document.getElementById('changelog-body');
     const subtitle = document.getElementById('changelog-subtitle');
     const dismissBtn = document.getElementById('changelog-dismiss') as HTMLButtonElement | null;
+    const viewFullBtn = document.getElementById('changelog-view-full') as HTMLButtonElement | null;
     if (!overlay || !body || !subtitle || !dismissBtn) return;
 
     subtitle.textContent = previous
@@ -104,50 +174,13 @@ export function showChangelogModal(entries: ChangelogEntry[], previous: string |
         : `Playground ${PLAYGROUND_VERSION}`;
 
     body.replaceChildren();
-    for (const entry of entries) {
-        const section = document.createElement('section');
-        section.className = 'changelog-entry';
+    for (const entry of entries) body.appendChild(renderChangelogEntry(entry));
 
-        const titleRow = document.createElement('div');
-        titleRow.className = 'changelog-entry-title';
-        const versionEl = document.createElement('span');
-        versionEl.className = 'changelog-entry-version';
-        versionEl.textContent = entry.version;
-        const dateEl = document.createElement('span');
-        dateEl.className = 'changelog-entry-date';
-        dateEl.textContent = entry.date;
-        titleRow.append(versionEl, dateEl);
-        section.appendChild(titleRow);
-
-        // Iterate categories in CHANGELOG_CATEGORIES order so the
-        // rendered layout always reads Added → Changed → Fixed →
-        // Removed → Notes regardless of object-literal key order.
-        for (const cat of CHANGELOG_CATEGORIES) {
-            const items = entry[cat.key];
-            if (!items || items.length === 0) continue;
-
-            const catBlock = document.createElement('div');
-            catBlock.className = 'changelog-cat';
-
-            const catTitle = document.createElement('div');
-            catTitle.className = 'changelog-cat-title';
-            catTitle.textContent = cat.label;
-            catBlock.appendChild(catTitle);
-
-            const list = document.createElement('ul');
-            for (const item of items) {
-                const li = document.createElement('li');
-                // innerHTML is fed marked-parsed-then-scrubbed
-                // output, never raw user input. See scrubInlineHtml.
-                li.innerHTML = renderBulletMarkdown(item);
-                list.appendChild(li);
-            }
-            catBlock.appendChild(list);
-            section.appendChild(catBlock);
-        }
-
-        body.appendChild(section);
-    }
+    // Offer "View full changelog" whenever main.ts wired an opener and
+    // we're showing an upgrade (previous set). The button routes to the
+    // Help panel's Changelog tab.
+    const canViewFull = !!openFullChangelog && previous !== null;
+    if (viewFullBtn) viewFullBtn.hidden = !canViewFull;
 
     overlay.hidden = false;
 
@@ -157,18 +190,15 @@ export function showChangelogModal(entries: ChangelogEntry[], previous: string |
         document.removeEventListener('keydown', onKeyDown);
         overlay.removeEventListener('click', onBackdropClick);
         dismissBtn.removeEventListener('click', dismiss);
+        viewFullBtn?.removeEventListener('click', onViewFull);
     };
     const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') dismiss(); };
     const onBackdropClick = (e: MouseEvent) => { if (e.target === overlay) dismiss(); };
+    const onViewFull = () => { dismiss(); openFullChangelog?.(); };
 
     dismissBtn.addEventListener('click', dismiss);
+    if (viewFullBtn && canViewFull) viewFullBtn.addEventListener('click', onViewFull);
     overlay.addEventListener('click', onBackdropClick);
     document.addEventListener('keydown', onKeyDown);
     dismissBtn.focus();
-}
-
-// Diagnostics-panel "view full changelog" entry point — shows every
-// known entry regardless of last-seen.
-export function showFullChangelog(): void {
-    showChangelogModal(CHANGELOG, null);
 }
