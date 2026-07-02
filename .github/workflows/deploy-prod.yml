@@ -1,20 +1,19 @@
 # Manual production release of the Playground. Trigger from the Actions tab
-# (Actions → "Deploy (production)" → Run workflow, enter a version).
+# (Actions → "Deploy (production)" → Run workflow).
 #
 # 1. Builds + deploys to the production Pages branch.
-# 2. On success, tags vX.Y.Z and creates a GitHub Release whose notes are the
-#    matching `## [X.Y.Z]` section of CHANGELOG.md (same mechanism as fade's
-#    dby release). Add that section to CHANGELOG.md before releasing.
+# 2. On success, reads the CURRENT version + notes from the top entry of
+#    Playground/src/changelog.ts (the single source of truth — same file that
+#    drives the in-app version popup), tags vX.Y.Z, and creates a GitHub Release
+#    with those notes.
+#
+# To cut a release: prepend a new entry to src/changelog.ts, then run this.
 name: Deploy (production)
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version, e.g. 1.2.0 (must have a matching ## [x.y.z] in CHANGELOG.md)"
-        required: true
 
-run-name: Release Playground v${{ inputs.version }} by @${{ github.actor }}
+run-name: Release Playground (production) by @${{ github.actor }}
 
 jobs:
   deploy:
@@ -30,31 +29,27 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Tag + GitHub Release from CHANGELOG.md
+      - name: Tag + GitHub Release from changelog.ts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # Extract the section between "## [$VERSION]" and the next "## [" .
-          # Pass VERSION via env (not ${{ }} interpolation) to avoid injection.
-          NOTES=$(awk -v v="$VERSION" '
-            $0 ~ ("^## \\[" v "\\]") { f=1; next }
-            f && /^## \[/ { exit }
-            f { print }
-          ' CHANGELOG.md | sed '/./,$!d')   # trim leading blank lines
+          V=$(npx -y tsx Playground/scripts/changelog-notes.ts --version)
+          npx -y tsx Playground/scripts/changelog-notes.ts > "$RUNNER_TEMP/notes.md"
+          echo "Releasing v$V"
+          cat "$RUNNER_TEMP/notes.md"
 
-          if [ -z "$NOTES" ]; then
-            echo "::error::No '## [$VERSION]' section found in CHANGELOG.md"
+          if git rev-parse "v$V" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "v$V" >/dev/null 2>&1; then
+            echo "::error::Tag v$V already exists — bump the top entry of src/changelog.ts before releasing."
             exit 1
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-
-          printf '%s\n' "$NOTES" | gh release create "v$VERSION" \
-            --title "v$VERSION" \
-            --notes-file -
+          git tag "v$V"
+          git push origin "v$V"
+          gh release create "v$V" --title "v$V" --notes-file "$RUNNER_TEMP/notes.md"
