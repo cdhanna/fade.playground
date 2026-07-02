@@ -75,7 +75,7 @@ published runtimes — a standalone checkout just works.
 |---|---|---|
 | `ci.yml` | push to `main`, PRs | Build + test the Playground (package-mode runtimes, `tsc`, `vitest`), ghostBot (`npm test`), and oauth-proxy (`typecheck`). |
 | `deploy-test.yml` | push to `main` (auto) + manual | Deploy to the test alias → `https://tests.fade-playground.pages.dev`. |
-| `deploy-prod.yml` | manual only | Deploy to the production Pages branch. |
+| `deploy-prod.yml` | manual only (enter a version) | Deploy to production, then tag `vX.Y.Z` and cut a GitHub Release whose notes are the matching `## [X.Y.Z]` section of `CHANGELOG.md`. |
 | `_deploy-pages.yml` | reusable | Shared build + `wrangler pages deploy` used by both deploy workflows. |
 | `ghostbot-release.yml` | manual + `ghostbot-v*` tags | Build the ghostBot Tauri app (macOS + Windows) → GitHub Release. |
 
@@ -90,6 +90,12 @@ Deploys build the web runtimes in **package mode** (no .NET on the runner) and
 
 ## Releasing
 
-The Playground releases on its own cadence. Bump the runtime it ships by editing
-`Playground/runtime-versions.json` (or the `FADE_*_VERSION` env) to a newer
-published Fade / MonoGame web-runtime version, then run **Deploy (production)**.
+The Playground releases on its own cadence:
+
+1. Bump the runtime it ships (if needed) in `Playground/runtime-versions.json`.
+2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to [`CHANGELOG.md`](CHANGELOG.md)
+   describing the release.
+3. Run **Actions → Deploy (production)** and enter `X.Y.Z`.
+
+That deploys to production, tags `vX.Y.Z`, and creates a GitHub Release using
+that changelog section as the notes (same pattern as fade's dby release).
