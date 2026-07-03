@@ -29,6 +29,10 @@ export interface CreateFadeEditorOptions {
     diagnostics?: boolean;
     /** Monaco theme id. Defaults to 'fade-dark'. */
     theme?: string;
+    /** Resolves when the LSP worker is command-aware (project type set +
+     *  command assemblies registered). The initial tokenize/diagnose waits for
+     *  it so commands like `print` classify correctly instead of generically. */
+    lspReady?: Promise<void>;
     /** Extra monaco editor options. */
     editorOptions?: monaco.editor.IStandaloneEditorConstructionOptions;
 }
@@ -70,9 +74,9 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         if (wantDiagnostics) await applyDiagnostics(opts.runner, model);
     };
 
-    // Initial pass — LSP messages queue in the worker (FIFO) and resolve once
-    // it's ready, so we don't need to await runner.ready first.
-    void refresh();
+    // Initial pass — wait until the LSP is command-aware so the first tokenize
+    // classifies commands correctly (else e.g. `print` colors generically).
+    void (opts.lspReady ?? Promise.resolve()).then(refresh);
 
     const sub = model.onDidChangeContent(() => {
         if (timer) clearTimeout(timer);
