@@ -7,19 +7,15 @@
 // Extracted from the Playground's src/debug/adapter.ts so the contract lives
 // with @fadebasic/runtime and can be shared by the component library.
 
+import type { DebugEvent } from './protocol';
+
 export type DebugStatus = 'idle' | 'starting' | 'running' | 'paused' | 'completed';
 export type StepKind = 'over' | 'in' | 'out';
 
-/** Raw debug event from the underlying runtime. Type-opaque from the
- *  adapter's perspective — consumers inspect `event.type` + `event.json` to
- *  decide what to do. Kept shapeless on purpose so the runner-side and
- *  monogame-side event variants don't need their schema centralised here. */
-export interface DebugEvent {
-    type: string;
-    id?: number;
-    json?: string;
-    [key: string]: unknown;
-}
+// DebugEvent (the raw runtime event the adapter surfaces) is defined in
+// protocol.ts — the single canonical shape shared by the runtime client and
+// this contract. Re-exported from the package barrel (index.ts).
+export type { DebugEvent };
 
 /** Reverse-resolved source coordinates returned by `resolveInstruction`. */
 export interface ResolvedInstruction {

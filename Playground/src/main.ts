@@ -1730,22 +1730,34 @@ function uriToName(uri: string): string {
 }
 
 // ─── runner ─────────────────────────────────────────────────────────────────
-interface RunnerOpts {
-    onPrint: (line: string) => void;
-    onAlert: (msg: string) => void;
-    onHeartbeat?: (role: 'lsp' | 'vm', tick: number, t: number) => void;
-}
-
-interface Diagnostic {
-    severity: number;
-    range: {
-        start: { line: number; character: number };
-        end: { line: number; character: number };
-    };
-    message: string;
-    code: string;
-    source: string;
-}
+// Runtime protocol DTOs moved to @fadebasic/runtime (Phase 2b — see
+// docs/embeddable-components-proposal.md). FadeRunner itself follows.
+import type {
+    RunnerOpts,
+    Diagnostic,
+    DocSymbol,
+    FoldingRange,
+    TextEdit,
+    WorkspaceEdit,
+    FormattingOptions,
+    TestEntry,
+    CommandDocEntry,
+    FailureFrame,
+    TestResult,
+    TestRunResult,
+    DebugStartResult,
+    BreakpointRequest,
+    DebugStackFrame,
+    DebugVariable,
+    DebugScope,
+    DebugScopesResult,
+    DebugEvalResult,
+    DebugEvent,
+    SignatureHelp,
+    Location,
+    HoverInfo,
+    CompletionItem,
+} from '@fadebasic/runtime';
 
 // Single worker that handles BOTH run and LSP messages. We tried a dedicated
 // LSP worker; same exact Fade-core calls that work in this worker hang in a
@@ -2541,171 +2553,6 @@ class FadeRunner {
     setDiagnosticsHandler(fn: (uri: string, diagnostics: Diagnostic[]) => void) {
         this.onDiagnostics = fn;
     }
-}
-
-// DTOs matching the camelCase JSON from FadeBasic.LSP.Core.*
-interface DocSymbol {
-    name: string;
-    detail: string;
-    kind: number;
-    range: { start: { line: number; character: number }; end: { line: number; character: number } };
-    selectionRange: { start: { line: number; character: number }; end: { line: number; character: number } };
-    children: DocSymbol[] | null;
-}
-interface FoldingRange {
-    startLine: number;
-    endLine: number;
-    startCharacter: number | null;
-    endCharacter: number | null;
-    kind: number;
-}
-interface TextEdit {
-    range: { start: { line: number; character: number }; end: { line: number; character: number } };
-    newText: string;
-}
-interface WorkspaceEdit {
-    changes: { [uri: string]: TextEdit[] };
-}
-interface FormattingOptions {
-    tabSize: number;
-    insertSpaces: boolean;
-    casing: number; // 0=Ignore, 1=ToUpper, 2=ToLower
-}
-interface TestEntry {
-    name: string;
-    isAbstract: boolean;
-    fromParent: string | null;
-    sourceLine: number;
-    sourceChar: number;
-}
-// One entry per uniquely-named command, shape matches what
-// `FadeBridge.ListCommandDocs()` emits in [FadeBasic.Export.Web/FadeBridge.cs].
-// The markdown field is the same text the hover provider renders; the
-// Help tab reuses it verbatim so both surfaces stay in sync.
-interface CommandDocEntry {
-    name: string;
-    signature: string;
-    group: string;
-    markdown: string;
-}
-interface FailureFrame {
-    functionName: string;
-    lineNumber: number;     // 0-based, as emitted by the lexer
-    charNumber: number;
-    instructionIndex: number;
-}
-interface TestResult {
-    name: string;
-    passed: boolean;
-    duration: number;
-    failureMessage: string | null;
-    failureReason: string | null;
-    failureSourceText: string | null;
-    failureInstructionIndex?: number;
-    failureFrames?: FailureFrame[];
-}
-interface TestRunResult {
-    passed: number;
-    failed: number;
-    duration: number;
-    results: TestResult[];
-    printed: string;
-    error?: string;
-}
-
-// ─── Debug session DTOs (match FadeBasic.Launch types over the wire) ────
-interface DebugStartResult {
-    ok: boolean;
-    error?: string;
-    statementLines: number[];
-}
-interface BreakpointRequest {
-    // Matches FadeBasic.Export.Web's BreakpointRequestDto (camelCase JSON via
-    // JsonNamingPolicy.CamelCase). Use 0-based line numbers — the same
-    // coordinate space the lexer's tokens use.
-    line: number;
-    column: number;
-}
-interface DebugStackFrame {
-    name: string;
-    lineNumber: number;
-    colNumber: number;
-}
-interface DebugVariable {
-    id: number;
-    name: string;
-    type: string;
-    value: string;
-    evalName: string;
-    fieldCount: number;
-    elementCount: number;
-}
-interface DebugScope {
-    id: number;
-    scopeName: string;
-    evalName: string;
-    variables: DebugVariable[];
-}
-interface DebugScopesResult {
-    scopes: DebugScope[];
-}
-// Mirrors FadeBasic.Launch.DebugEvalResult — note there's NO `failed`
-// boolean. The convention is: `id === -1` means the eval failed and
-// `value` carries the error message. A successful eval returns the
-// evaluated text in `value` and a non-negative `id`.
-interface DebugEvalResult {
-    id: number;
-    value: string;
-    type?: string;
-    fieldCount?: number;
-    elementCount?: number;
-}
-
-// Wire-format events emitted by the worker's debug-tick loop.
-// `type` is the DebugMessageType enum name from C# (uppercase snake) or
-// a synthetic 'complete' / 'error'.
-interface DebugEvent {
-    type: string;
-    id?: number;
-    json?: string;
-    message?: string;
-}
-
-// Matches FadeBasic.LSP.Core.Handlers.LspSignatureHelp shape.
-interface SignatureParam { label: string; documentation: string | null }
-interface SignatureInformation {
-    label: string;
-    documentation: string | null;
-    parameters: SignatureParam[];
-    activeParameter: number;
-}
-interface SignatureHelp {
-    signatures: SignatureInformation[];
-    activeSignature: number;
-    activeParameter: number;
-}
-
-interface Location {
-    uri: string;
-    range: { start: { line: number; character: number }; end: { line: number; character: number } };
-}
-
-interface HoverInfo {
-    contents: string;
-    range: { start: { line: number; character: number }; end: { line: number; character: number } };
-}
-
-// Matches FadeBasic.LSP.Core.LspCompletionItem shape (camelCase JSON).
-interface CompletionItem {
-    label: string;
-    insertText: string;
-    kind: number;
-    detail: string;
-    documentation: string;
-    sortText: string;
-    filterText: string;
-    insertTextFormat: number;
-    triggerParameterHints: boolean;
 }
 
 // ─── First-run workspace picker ─────────────────────────────────────────────
