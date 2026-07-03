@@ -2,7 +2,7 @@
   "name": "@fadebasic/components",
   "version": "0.0.0",
   "private": true,
-  "description": "Framework-agnostic web components: <fade-editor>, <fade-runnable>, and the debug UI (toolbar, variables, watch, call-stack, breakpoints, console). (scaffold — Phase 4)",
+  "description": "Framework-agnostic web components for embedding FadeBasic: <fade-runnable> (editor + Run + output). (Phase 4)",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -11,5 +11,9 @@
   },
   "files": [
     "src"
-  ]
+  ],
+  "dependencies": {
+    "@fadebasic/editor": "*",
+    "@fadebasic/runtime": "*"
+  }
 }
