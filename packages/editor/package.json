@@ -2,7 +2,7 @@
   "name": "@fadebasic/editor",
   "version": "0.0.0",
   "private": true,
-  "description": "Standalone monaco-editor + Fade language: Monarch grammar + LSP providers wired to @fadebasic/runtime. (scaffold — Phase 3)",
+  "description": "Standalone monaco-editor + Fade language: semantic-token highlighting + LSP providers wired to @fadebasic/runtime. (Phase 3)",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -11,5 +11,9 @@
   },
   "files": [
     "src"
-  ]
+  ],
+  "dependencies": {
+    "@fadebasic/runtime": "*",
+    "monaco-editor": "^0.52.0"
+  }
 }
