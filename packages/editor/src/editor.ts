@@ -27,6 +27,8 @@ export interface CreateFadeEditorOptions {
     readonly?: boolean;
     /** Live LSP diagnostics (red squiggles). Defaults to `!readonly`. */
     diagnostics?: boolean;
+    /** Show the glyph margin (for breakpoint dots). Defaults to false. */
+    glyphMargin?: boolean;
     /** Monaco theme id. Defaults to 'fade-dark'. */
     theme?: string;
     /** Resolves when the LSP worker is command-aware (project type set +
@@ -43,6 +45,12 @@ export interface FadeEditor {
     /** Current editor text. */
     getValue(): string;
     setValue(text: string): void;
+    /** Subscribe to breakpoint-gutter clicks (1-based line numbers). */
+    onBreakpointToggle(cb: (line: number) => void): void;
+    /** Render the given (1-based) lines as breakpoint glyphs. */
+    setBreakpointLines(lines: number[]): void;
+    /** Highlight the paused line (1-based), or clear with null. */
+    setCurrentLine(line: number | null): void;
     dispose(): void;
 }
 
@@ -54,6 +62,7 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
     const model = monaco.editor.createModel(opts.value ?? '', 'fade', uri);
     const wantDiagnostics = opts.diagnostics ?? !opts.readonly;
 
+    ensureDebugCss();
     const editor = monaco.editor.create(container, {
         model,
         theme: opts.theme ?? 'fade-dark',
@@ -61,9 +70,13 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         automaticLayout: true,
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
+        glyphMargin: opts.glyphMargin ?? false,
         fontSize: 14,
         ...opts.editorOptions,
     });
+
+    let bpDecos: string[] = [];
+    let curLineDecos: string[] = [];
 
     let decorations: string[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -88,6 +101,26 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         model,
         getValue: () => model.getValue(),
         setValue: (text: string) => model.setValue(text),
+        onBreakpointToggle: (cb) => {
+            editor.onMouseDown((e) => {
+                if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && e.target.position) {
+                    cb(e.target.position.lineNumber);
+                }
+            });
+        },
+        setBreakpointLines: (lines) => {
+            bpDecos = editor.deltaDecorations(bpDecos, lines.map((ln) => ({
+                range: new monaco.Range(ln, 1, ln, 1),
+                options: { glyphMarginClassName: 'fade-bp', stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges },
+            })));
+        },
+        setCurrentLine: (line) => {
+            curLineDecos = editor.deltaDecorations(curLineDecos, line == null ? [] : [{
+                range: new monaco.Range(line, 1, line, 1),
+                options: { isWholeLine: true, className: 'fade-current-line', glyphMarginClassName: 'fade-current-line-glyph' },
+            }]);
+            if (line != null) editor.revealLineInCenterIfOutsideViewport(line);
+        },
         dispose: () => {
             if (timer) clearTimeout(timer);
             sub.dispose();
@@ -95,4 +128,18 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
             model.dispose();
         },
     };
+}
+
+let debugCssInjected = false;
+function ensureDebugCss(): void {
+    if (debugCssInjected || typeof document === 'undefined') return;
+    debugCssInjected = true;
+    const style = document.createElement('style');
+    style.setAttribute('data-fade-debug', '');
+    style.textContent = `
+.monaco-editor .fade-bp { background: radial-gradient(circle, #e51400 45%, transparent 50%); cursor: pointer; }
+.monaco-editor .fade-current-line { background: rgba(255, 221, 51, 0.14); }
+.monaco-editor .fade-current-line-glyph { background: radial-gradient(circle, #ffcc00 45%, transparent 50%); }
+`;
+    document.head.appendChild(style);
 }
