@@ -1,7 +1,19 @@
 import { defineConfig } from 'vite';
+import { fileURLToPath } from 'node:url';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 
 export default defineConfig({
+    resolve: {
+        alias: {
+            // Consume the embeddable runtime package from source during dev/build.
+            // Playground isn't an npm workspace member yet (see the monorepo
+            // proposal); this alias + the tsconfig `paths` entry let it import
+            // @fadebasic/runtime by name without a workspace-join reinstall.
+            '@fadebasic/runtime': fileURLToPath(
+                new URL('../packages/runtime/src/index.ts', import.meta.url),
+            ),
+        },
+    },
     server: {
         port: 5311,
         strictPort: true,

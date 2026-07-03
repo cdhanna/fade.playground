@@ -144,17 +144,59 @@ print "hello, fade"
 for i = 1 to 5 : print i : next i
 </fade-runnable>
 ```
-`<fade-runnable>` = `<fade-editor>` + Run button + output pane. The `debug`
-attribute adds the breakpoint gutter (Monaco glyph-margin decorations →
-`setBreakpoints`), the 5-button toolbar (continue / step-over / step-into /
-step-out / stop), current-line highlight on `stopped`, and a
-variables/callstack view (from `scopes` + `stack-frames`). Web Components
-= drop into Svelte, plain HTML, MDX — and multiple per page.
+`<fade-runnable>` = `<fade-editor>` + Run button + output pane. Web
+Components drop into Svelte, plain HTML, MDX — and there can be many per
+page.
 
-## 5. Debugging in the embed — feasible, one thing to verify
+**Debug components (à la carte).** The `debug` attribute on `<fade-runnable>`
+wires a sensible default arrangement, but each debug view is also its own
+component you can place anywhere — this is the "not tabular" payoff: no
+dockview, no fixed tab layout, compose what you want.
 
-The debug **protocol is complete** (see the table in §2), so surfacing
-controls is UI work, not protocol work. One real constraint:
+| Component | Backed by (`DebugAdapter`) |
+|---|---|
+| `<fade-debug-toolbar>` | continue / pause / step(over\|in\|out) / terminate |
+| `<fade-variables>` | `scopes` + `expandVariable` |
+| `<fade-watch>` | `eval` per expression |
+| `<fade-call-stack>` | `stackFrames` |
+| `<fade-breakpoints>` | `setBreakpoints` (list view) |
+| `<fade-debug-console>` | `eval` / `repl` (the REPL) |
+
+The **breakpoint gutter** is not a panel — it's a Monaco glyph-margin
+decoration, so it lives on `<fade-editor>`/`<fade-runnable>`, plus a
+current-line highlight driven by the `stopped` event.
+
+**Two hard requirements (surfaced by the §10 litmus test):**
+
+1. **Code as a *property*, not only slotted text.** Svelte (and JSX/MDX)
+   parse `{` `}`; Fade source and markdown both contain braces. Generators
+   must pass source as a string prop — `<fade-runnable code={src}>` — never
+   as raw text between tags. Slotted text stays supported for hand-authored
+   HTML, but `code=` is the safe path for generated pages.
+2. **A read-only, highlight-only mode** — `<fade-editor readonly>` that
+   colors via Monarch but skips the LSP, so display-only doc fragments
+   don't show false "unknown symbol" squiggles.
+
+*Scope tiers:* toolbar + variables + console cover "debug a snippet" (the
+fadebasic.com front page). Watch / call-stack / breakpoints-list are a
+full-tutorial-IDE need — ship them in a second wave.
+
+**Reuse note — the debug logic is already factored.** [src/debug/](../Playground/src/debug/)
+already contains a clean `DebugAdapter` interface ([adapter.ts](../Playground/src/debug/adapter.ts))
+with `local`, `remote` (observe a peer over collab), and `facade`
+implementations. That's the debug state machine + protocol driver, decoupled
+from `main.ts` — it moves into `@fadebasic/runtime` essentially as-is. The
+only real work is the **views**: they exist and are visually proven, but as
+DOM-ID markup in `index.html` driven by `main.ts` render functions
+(entangled with globals like `debugSessionActive`, collab hooks, dockview).
+Rebuilding them as components = porting that render logic onto the adapter's
+event stream. Mechanical view work, not protocol work.
+
+## 5. Debugging in the embed — feasible, no blockers
+
+The debug **protocol is complete** (see the table in §2) *and* the
+adapter layer is already factored (see §4), so surfacing controls is UI
+work, not protocol work. One thing to keep in mind:
 
 1. **The VM runs in an iframe.** The embed must inject that iframe (it can
    be the visible output surface, or hidden for text-only programs).
@@ -260,4 +302,60 @@ Phase 0 + Phase 1: stand up workspaces and carve out
 `@fadebasic/runtime-assets`, with the Playground consuming it. Lowest
 risk, unblocks everything, and proves the monorepo plumbing before we
 touch any hot code in `main.ts`.
+
+## 10. Litmus test — interactive `Language.md` at fadebasic.com/#/help
+
+The success criterion for the whole effort: a route on the homepage that
+renders [`dby/FadeBasic/book/FadeBook/Language.md`](../../dby/FadeBasic/book/FadeBook/Language.md)
+(2180 lines, 148 ` ```basic ` blocks) with the code snippets turned
+interactive via the components. If this works, the library is real.
+
+**Runnability is opt-in — this is the make-or-break design choice.** Most
+` ```basic ` blocks are *teaching fragments*, not standalone programs:
+declarations with no output (`x = 27`), intentionally-invalid examples
+(`message$ = 27` — the doc *wants* it wrong), and context-dependent
+snippets (`x = add(1,2)` references `add` from a prior block). Auto-running
+all of them yields a page of no-ops and false errors. So use the markdown
+fence info string:
+
+| Fence | Renders as |
+|---|---|
+| ` ```basic ` | `<fade-editor readonly>` — highlighted, no Run, no LSP |
+| ` ```basic run ` | `<fade-runnable>` — Run + output; author curates these self-contained |
+| ` ```basic run invalid ` | runnable **with** LSP on, so the wrong example shows its squiggle |
+
+Only the ~20–40 examples worth running get annotated; the rest still look
+polished (highlighted). `Language.md` is authored in-repo, so this is cheap.
+
+**Generator (`fade-md-to-svelte`)** — lives in *this* repo (generic tooling,
+reused later by the tutorial platform); its input `Language.md` lives beside
+`homepage` in `dby`, so in the dby build it's a sibling path, not a
+cross-repo fetch. Output stays boring and safe:
+
+```
+Language.md ──▶ src/generated/help-content.js   (ordered [{prose html} | {code, mode}])
+                Help.svelte (hand-written, stable) imports it:
+                   prose → {@html block.html}          (via marked)
+                   code  → <fade-runnable code={block.code}/>  |  <fade-editor readonly code=…/>
+```
+
+Emitting a **data module + one hand-written `Help.svelte`** (not raw
+`.svelte` markup) dodges Svelte brace-escaping and keeps component logic
+hand-versioned. The `basic` fence tag maps to the component's internal
+`fade` language.
+
+**Routing** — `homepage` has no router. Use a **hash route**
+(`fadebasic.com/#/help`) via a small `App.svelte` conditional (or
+`svelte-spa-router`) — simplest and GH-Pages-safe. For a clean `/help` URL,
+add a second Vite entry (`help.html`); also static.
+
+**npm wiring** — `file:`/workspace link to `../../Fade.Playground/packages/*`
+during dev; the dby release workflow installs published `@fadebasic/*` from
+npm. Prebuild copies `runtime-assets` → `homepage/public/fade/` and runs
+`fade-md-to-svelte` before `vite build`.
+
+**New work this adds** beyond Phases 0–6: the `fade-md-to-svelte` generator
+(small), the `readonly`/`code`-prop component requirements (§4), and the
+homepage route + prebuild wiring. It slots in as the concrete deliverable of
+Phases 5–6.
 </content>

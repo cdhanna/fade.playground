@@ -1,0 +1,21 @@
+{
+  "name": "@fadebasic/runtime-assets",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Staged FadeBasic web runtime (worker.js + runtime.js + _framework/*.wasm), version-pinned to the published NuGet runtime. Shipped as files for consumers to self-host same-origin.",
+  "type": "module",
+  "bin": {
+    "fade-stage-runtime": "scripts/stage.mjs"
+  },
+  "scripts": {
+    "stage": "node scripts/stage.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "runtime-versions.json"
+  ]
+}

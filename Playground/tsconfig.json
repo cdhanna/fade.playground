@@ -15,7 +15,11 @@
     "isolatedModules": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["node", "vite/client"]
+    "types": ["node", "vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@fadebasic/runtime": ["../packages/runtime/src/index.ts"]
+    }
   },
-  "include": ["src", "scripts"]
+  "include": ["src", "scripts", "../packages/runtime/src"]
 }

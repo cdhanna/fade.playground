@@ -1,0 +1,15 @@
+{
+  "name": "fade-playground-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Monorepo root: the Fade Playground IDE, the @fadebasic/* embeddable component library, and example consumers.",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build:packages": "npm run build --workspaces --if-present",
+    "stage:runtime-assets": "npm run stage -w @fadebasic/runtime-assets"
+  },
+  "//": "Playground/, ghostBot/, and oauth-proxy/ are intentionally NOT workspaces yet — they keep their own installs so this change can't disturb the working Playground. Playground joins the workspace in Phase 2 (see docs/embeddable-components-proposal.md), when it starts importing @fadebasic/* as real module deps."
+}

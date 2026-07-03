@@ -5,8 +5,9 @@
 // Two modes (see scripts/lib/sources.mjs):
 //   source  — dotnet publish/build the sibling FadeBasic repo. Dev default when
 //             it's checked out next door; picks up local Lang.Core edits.
-//   package — download the pinned FadeBasic.Export.Web + FadeBasic.Lib.Web
-//             nupkgs and extract them. No .NET SDK or source tree required.
+//   package — delegate to @fadebasic/runtime-assets' stageWebRuntime(), which
+//             downloads the pinned nupkgs. Single source of truth for the
+//             packaged web runtime, shared with the embeddable components.
 //
 // Layout under public/runtime/:
 //   web/         ← this script's output (Export.Web template)
@@ -17,9 +18,9 @@ import { execSync } from 'node:child_process';
 import { rm, mkdir, cp, copyFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { runtimeRoot, fadeLibsDir, fadeRepoDir, pkgVersions, runtimeMode } from './lib/sources.mjs';
-import { fetchNupkgEntries, extractPrefix, extractFile } from './lib/nuget.mjs';
+import { runtimeRoot, fadeLibsDir, fadeRepoDir, runtimeMode } from './lib/sources.mjs';
 import { writeRuntimeManifest } from './lib/manifest.mjs';
+import { stageWebRuntime } from '../../packages/runtime-assets/scripts/stage.mjs';
 
 const LOG = '[build:runtime]';
 const targetDir = resolve(runtimeRoot, 'web');
@@ -40,14 +41,13 @@ if (existsSync(runtimeRoot)) {
     }
 }
 
-console.log(`${LOG} clearing`, targetDir);
-await rm(targetDir, { recursive: true, force: true });
-await mkdir(targetDir, { recursive: true });
-// Don't wipe fade-libs — build-monogame-runtime.mjs stages its own DLLs there.
-// Just ensure it exists and overwrite our own DLL below.
-await mkdir(fadeLibsDir, { recursive: true });
-
 if (mode === 'source') {
+    console.log(`${LOG} clearing`, targetDir);
+    await rm(targetDir, { recursive: true, force: true });
+    await mkdir(targetDir, { recursive: true });
+    // Don't wipe fade-libs — build-monogame-runtime.mjs stages its own DLLs there.
+    await mkdir(fadeLibsDir, { recursive: true });
+
     const project = resolve(fadeRepoDir, 'FadeBasic.Export.Web', 'FadeBasic.Export.Web.csproj');
     const publishOut = resolve(fadeRepoDir, 'FadeBasic.Export.Web', 'bin', 'Release', 'net8.0', 'publish', 'wwwroot');
     console.log(`${LOG} dotnet publish`, project);
@@ -71,15 +71,13 @@ if (mode === 'source') {
         process.exit(1);
     }
     await copyFile(libDll, resolve(fadeLibsDir, 'FadeBasic.Lib.Web.dll'));
+    console.log(`${LOG} staged FadeBasic.Lib.Web.dll → public/runtime/fade-libs/`);
+
+    await writeRuntimeManifest(targetDir, LOG);
 } else {
-    const web = await fetchNupkgEntries('FadeBasic.Export.Web', pkgVersions.exportWeb);
-    const n = await extractPrefix(web, 'build/wasm/', targetDir);
-    console.log(`${LOG} extracted ${n} files from FadeBasic.Export.Web ${pkgVersions.exportWeb} → web/`);
-
-    const lib = await fetchNupkgEntries('FadeBasic.Lib.Web', pkgVersions.libWeb);
-    await extractFile(lib, 'lib/net8.0/FadeBasic.Lib.Web.dll', resolve(fadeLibsDir, 'FadeBasic.Lib.Web.dll'));
+    // Package mode delegates to the runtime-assets package — the single owner
+    // of the packaged web runtime staging (extract prefixes, lib DLL, manifest).
+    await stageWebRuntime({ outDir: runtimeRoot, log: LOG });
 }
-console.log(`${LOG} staged FadeBasic.Lib.Web.dll → public/runtime/fade-libs/`);
 
-await writeRuntimeManifest(targetDir, LOG);
 console.log(`${LOG} done.`);

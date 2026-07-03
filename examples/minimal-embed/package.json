@@ -1,0 +1,7 @@
+{
+  "name": "@fadebasic/example-minimal-embed",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Vite consumer of @fadebasic/components — reference for fadebasic.com and a manual test bed. (scaffold — Phase 5)",
+  "type": "module"
+}
