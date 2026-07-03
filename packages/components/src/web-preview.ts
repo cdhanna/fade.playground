@@ -35,10 +35,29 @@ export async function armWebPreview(
     frame.src = `${base}web/index.html?preview=1`;
     await ready;
 
+    // Bootstrap the standard web command library. FadeBasic.Lib.Web implements
+    // the everyday commands (print, str$, math, …); the LSP knows them at
+    // compile time, but the VM iframe needs the DLL *loaded* to bind them at
+    // runtime — without it `print` compiles but is a no-op. This mirrors the
+    // Playground's collectCommandDllEntries web default.
+    const commandDlls: { assembly: string; class: string; bytes: ArrayBuffer }[] = [];
+    try {
+        const resp = await fetch(`${base}fade-libs/FadeBasic.Lib.Web.dll`);
+        if (resp.ok) {
+            commandDlls.push({
+                assembly: 'FadeBasic.Lib.Web',
+                class: 'FadeBasic.Lib.Web.WebCommands',
+                bytes: await resp.arrayBuffer(),
+            });
+        }
+    } catch { /* offline / missing — arm with no commands, print will no-op */ }
+
     const armed = waitForMessage(frame, 'preview-armed');
-    // Empty command set — standard commands (print, math, strings) live in the
-    // core runtime. Embeds needing extra libraries can extend this later.
-    frame.contentWindow!.postMessage({ type: 'bootstrap', commandDlls: [] }, '*');
+    frame.contentWindow!.postMessage(
+        { type: 'bootstrap', commandDlls },
+        '*',
+        commandDlls.map((c) => c.bytes),
+    );
     await armed;
 
     runner.attachVmIframe(frame);

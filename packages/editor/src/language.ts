@@ -175,9 +175,13 @@ let cssInjected = false;
 function injectTokenCss(): void {
     if (cssInjected || typeof document === 'undefined') return;
     cssInjected = true;
+    // Scope under `.monaco-editor` + `!important` so these win over monaco's
+    // default token foreground (fade has no Monarch grammar, so every token is
+    // monaco's default color until these decoration classes override it). This
+    // mirrors the Playground's index.html `.monaco-editor .fade-token-*` rules.
     const css = Object.entries(DARK_COLORS)
-        .map(([t, c]) => `.fade-token-${t}{color:${c};}`)
-        .join('\n') + '\n.fade-token-comment{font-style:italic;}';
+        .map(([t, c]) => `.monaco-editor .fade-token-${t}{color:${c} !important;}`)
+        .join('\n') + '\n.monaco-editor .fade-token-comment{font-style:italic;}';
     const style = document.createElement('style');
     style.setAttribute('data-fade-tokens', '');
     style.textContent = css;
