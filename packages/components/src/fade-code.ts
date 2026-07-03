@@ -9,6 +9,7 @@ import { getSharedRunner, getLspReady } from './runner-pool';
 
 export class FadeCodeElement extends HTMLElement {
     private _code?: string;
+    private io?: IntersectionObserver;
 
     get code(): string { return this._code ?? ''; }
     set code(v: string) { this._code = v; if (this.isConnected) this.render(); }
@@ -17,6 +18,11 @@ export class FadeCodeElement extends HTMLElement {
         injectStyles();
         injectSnippetCss();
         this.render();
+    }
+
+    disconnectedCallback(): void {
+        this.io?.disconnect();
+        this.io = undefined;
     }
 
     private render(): void {
@@ -28,13 +34,25 @@ export class FadeCodeElement extends HTMLElement {
         this.innerHTML = `<pre class="fade-code__pre"><code>${highlightFadeStatic(source)}</code></pre>`;
         const codeEl = this.querySelector('code')!;
 
-        // Upgrade to full semantic highlighting (command-aware) once the LSP is
-        // ready. tokenizeSnippet is a cheap worker call — no editor instance.
-        const runner = getSharedRunner(assetBase);
-        void getLspReady(runner, assetBase)
-            .then(() => runner.tokenizeSnippet(source))
-            .then((tokens) => { if (tokens.length) codeEl.innerHTML = renderTokenizedSnippet(source, tokens); })
-            .catch(() => { /* keep the static coloring */ });
+        // Upgrade to full semantic highlighting (command-aware) via the LSP —
+        // but LAZILY. A docs page can have 100+ blocks; tokenizing them all up
+        // front serializes 100+ calls through the one shared worker and feels
+        // slow. Only upgrade blocks as they scroll into view. The static
+        // coloring already covers everything off-screen.
+        const upgrade = () => {
+            const runner = getSharedRunner(assetBase);
+            void getLspReady(runner, assetBase)
+                .then(() => runner.tokenizeSnippet(source))
+                .then((tokens) => { if (tokens.length && this.isConnected) codeEl.innerHTML = renderTokenizedSnippet(source, tokens); })
+                .catch(() => { /* keep the static coloring */ });
+        };
+
+        if (typeof IntersectionObserver === 'undefined') { upgrade(); return; }
+        this.io?.disconnect();
+        this.io = new IntersectionObserver((entries, obs) => {
+            if (entries.some((e) => e.isIntersecting)) { obs.disconnect(); this.io = undefined; upgrade(); }
+        }, { rootMargin: '200px' });
+        this.io.observe(this);
     }
 }
 
