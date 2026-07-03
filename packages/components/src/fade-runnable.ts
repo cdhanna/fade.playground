@@ -10,6 +10,26 @@ import { FadeRunner } from '@fadebasic/runtime';
 import { createFadeEditor, type FadeEditor } from '@fadebasic/editor';
 import { armWebPreview } from './web-preview';
 
+// One LSP worker per asset base, shared by every <fade-runnable> on the page.
+// Each worker is a full .NET WASM runtime (tens of MB) — a docs page with 100+
+// snippets would OOM if each spun up its own. The worker is multi-document
+// (keyed by editor URI), so one serves all editors' highlighting + diagnostics.
+// The VM iframe (run surface) is still per-element; the shared runner's VM
+// target is re-pointed to whichever element is running (runs are sequential).
+const sharedRunners = new Map<string, FadeRunner>();
+function getSharedRunner(assetBase: string): FadeRunner {
+    let r = sharedRunners.get(assetBase);
+    if (!r) {
+        r = new FadeRunner({
+            assetBase,
+            onPrint: () => { /* web print renders inside the preview iframe */ },
+            onAlert: (msg) => console.warn('[fade-runnable] alert:', msg),
+        });
+        sharedRunners.set(assetBase, r);
+    }
+    return r;
+}
+
 export class FadeRunnableElement extends HTMLElement {
     private runner?: FadeRunner;
     private fadeEditor?: FadeEditor;
@@ -30,7 +50,9 @@ export class FadeRunnableElement extends HTMLElement {
     connectedCallback(): void {
         if (this.fadeEditor) return; // already mounted
         injectStyles();
-        const source = this._code ?? dedent(this.textContent ?? '');
+        // Source precedence: `code` property (set by frameworks / generators),
+        // then a `code` attribute, then slotted text (hand-authored HTML).
+        const source = this._code ?? this.getAttribute('code') ?? dedent(this.textContent ?? '');
         const assetBase = this.getAttribute('asset-base') ?? '/runtime/';
         const readonly = this.hasAttribute('readonly');
         const noRun = this.hasAttribute('no-run');
@@ -48,11 +70,7 @@ export class FadeRunnableElement extends HTMLElement {
         // (see the runtime's index.html internalOnly set). So the iframe *is*
         // the output surface; we show it, sized, below the toolbar. Only
         // created for runnable snippets.
-        this.runner = new FadeRunner({
-            assetBase,
-            onPrint: () => { /* rendered inside the preview iframe */ },
-            onAlert: (msg) => this.setStatus(msg, 'error'),
-        });
+        this.runner = getSharedRunner(assetBase);
 
         this.fadeEditor = createFadeEditor(editorHost, {
             runner: this.runner,
