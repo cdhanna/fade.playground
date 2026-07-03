@@ -1,8 +1,9 @@
 // @fadebasic/runtime — DOM-free client for the FadeBasic runtime.
 //
-// Phase 2 (in progress): the debug contract and the wire-protocol DTOs are
-// extracted first; the FadeRunner transport client (LSP worker + VM iframe
-// protocol) follows.
+// The FadeRunner transport client (LSP worker + VM iframe + debug protocol),
+// the debug adapter contract, and the wire-protocol DTOs.
+
+export { FadeRunner } from './runner';
 
 // Debug adapter contract.
 export type {
@@ -41,4 +42,5 @@ export type {
     Location,
     HoverInfo,
     CompletionItem,
+    SnippetToken,
 } from './protocol';

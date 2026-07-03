@@ -6,11 +6,24 @@
 // (FadeRunner, Phase 2b) and the embeddable editor/components can share one
 // source of truth. DOM-free.
 
-/** Callbacks the runtime client reports side effects through. */
+/** Callbacks + config the runtime client is constructed with. */
 export interface RunnerOpts {
     onPrint: (line: string) => void;
     onAlert: (msg: string) => void;
     onHeartbeat?: (role: 'lsp' | 'vm', tick: number, t: number) => void;
+    /** Base URL the runtime assets are served from (must end with '/').
+     *  The LSP worker is loaded from `${assetBase}web/worker.js`. Defaults to
+     *  '/runtime/' — where the Playground stages them. Embeds that self-host
+     *  the assets elsewhere (e.g. fadebasic.com/fade/) override this. */
+    assetBase?: string;
+}
+
+/** A syntax-highlight token from the LSP's snippet tokenizer. */
+export interface SnippetToken {
+    line: number;
+    col: number;
+    length: number;
+    type: number;
 }
 
 export interface Diagnostic {
