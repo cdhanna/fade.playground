@@ -501,12 +501,13 @@ function dedent(s: string): string {
     return lines.map((l) => l.slice(indent)).join('\n');
 }
 
-let stylesInjected = false;
 function injectStyles(): void {
-    if (stylesInjected || typeof document === 'undefined') return;
-    stylesInjected = true;
-    const style = document.createElement('style');
-    style.setAttribute('data-fade-runnable', '');
+    if (typeof document === 'undefined') return;
+    // Find-or-create a single <style>, and always refresh its contents. Not a
+    // one-shot guard, so Vite HMR (which re-runs this module and reconstructs
+    // elements) picks up CSS edits without a full page reload.
+    let style = document.head.querySelector<HTMLStyleElement>('style[data-fade-runnable]');
+    if (!style) { style = document.createElement('style'); style.setAttribute('data-fade-runnable', ''); document.head.appendChild(style); }
     style.textContent = `
 .fade-runnable { display: block; border: 1px solid #333; border-radius: 6px; overflow: hidden; background: #1e1e1e; color: #d4d4d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fade-runnable__editor { height: 220px; }
@@ -600,7 +601,6 @@ function injectStyles(): void {
 .fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; }
 .fade-runnable--ide .fade-runnable__status { padding: 0 10px 0 4px; }
 `;
-    document.head.appendChild(style);
 }
 
 if (typeof customElements !== 'undefined' && !customElements.get('fade-runnable')) {
