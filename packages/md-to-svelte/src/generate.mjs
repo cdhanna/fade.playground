@@ -76,12 +76,13 @@ marked.use({
 const src = readFileSync(resolve(input), 'utf8');
 const tokens = marked.lexer(src);
 
-// Build the TOC from headings (h1–h3). Slug dedupe mirrors uniqueSlug above:
-// tokens are walked in document order, same as rendering, so slugs line up.
+// Build the TOC from headings (h1–h4 — the docs use #### for subsections and
+// skip ###). Slug dedupe mirrors uniqueSlug above: tokens are walked in
+// document order, same as rendering, so slugs line up.
 const tocCounts = new Map();
 const toc = [];
 for (const tok of tokens) {
-    if (tok.type !== 'heading' || tok.depth > 3) continue;
+    if (tok.type !== 'heading' || tok.depth > 4) continue;
     const base = slugify(tok.text);
     const n = tocCounts.get(base) ?? 0;
     tocCounts.set(base, n + 1);
