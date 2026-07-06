@@ -588,7 +588,11 @@ function injectStyles(): void {
 .fade-runnable__repl-input { flex: 1; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
 .fade-runnable__repl-input:disabled { opacity: 0.5; }
 /* IDE layout — mini VSCode */
-.fade-runnable--ide { display: grid; height: min(80vh, 900px); min-height: 480px; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr minmax(140px, 26%); grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
+/* minmax(0, 1fr) — NOT plain 1fr — so the editor track can shrink below its
+   content's min-content. Monaco's min-content (longest line) is large; with a
+   bare 1fr the grid (and the toolbar spanning it) is forced wider than the
+   viewport, pushing the right-aligned Run/Debug buttons off-screen. */
+.fade-runnable--ide { display: grid; height: min(80vh, 900px); min-height: 480px; grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: auto 1fr minmax(140px, 26%); grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
 .fade-runnable--ide .fade-runnable__toolbar { grid-area: toolbar; border-top: 0; border-bottom: 1px solid #333; }
 .fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; border-top: 0; }
 .fade-runnable--ide .fade-runnable__pane-editor { grid-area: editor; height: 100%; }
