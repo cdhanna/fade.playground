@@ -44,12 +44,31 @@ const uniqueSlug = (text) => {
     slugCounts.set(base, n + 1);
     return n === 0 ? base : `${base}-${n}`;
 };
+// GitHub-style alert/callout labels. `> [!NOTE]` etc. render as plain
+// blockquotes in vanilla marked; we upgrade them to styled callouts.
+const ALERT_LABELS = { note: 'Note', tip: 'Tip', important: 'Important', warning: 'Warning', caution: 'Caution' };
+
 marked.use({
     renderer: {
         heading(token) {
             const inner = this.parser.parseInline(token.tokens);
             const slug = uniqueSlug(token.text);
             return `<h${token.depth} id="${slug}">${inner}</h${token.depth}>\n`;
+        },
+        blockquote(token) {
+            // Strip the `> ` markers, then look for a leading `[!TYPE]` line.
+            const body = token.raw.replace(/^ *> ?/gm, '');
+            const m = body.match(/^\[!(note|tip|important|warning|caution)\][^\n]*\r?\n?/i);
+            if (m) {
+                const type = m[1].toLowerCase();
+                // Re-parse the remainder as Markdown so nested lists/code/links
+                // inside the callout render correctly.
+                const inner = marked.parse(body.slice(m[0].length));
+                return `<div class="fade-callout fade-callout--${type}">`
+                    + `<div class="fade-callout__title">${ALERT_LABELS[type]}</div>`
+                    + `<div class="fade-callout__body">${inner}</div></div>\n`;
+            }
+            return `<blockquote>${this.parser.parse(token.tokens)}</blockquote>\n`;
         },
     },
 });
@@ -77,7 +96,18 @@ const flushProse = () => {
     proseBuf = [];
 };
 
+// Hidden authoring hint: `<!-- fade:hint … -->` on its own line attaches
+// instructive text to the NEXT code block (e.g. "add a PRINT / set a
+// breakpoint"). It's an HTML comment, so GitHub renders nothing — the hint is
+// only surfaced in the interactive Help UI.
+let pendingHint = null;
+const HINT_RE = /<!--\s*fade:hint\s+([\s\S]*?)\s*-->/i;
+
 for (const tok of tokens) {
+    if (tok.type === 'html') {
+        const m = (tok.raw || tok.text || '').match(HINT_RE);
+        if (m) { pendingHint = m[1].trim().replace(/\s+/g, ' '); continue; } // consume; don't render
+    }
     const lang = (tok.type === 'code' ? (tok.lang || '') : '').trim().toLowerCase();
     const isFade = lang === 'basic' || lang.startsWith('basic ');
     if (isFade) {
@@ -89,7 +119,9 @@ for (const tok of tokens) {
             code: tok.text,
             runnable: !flags.includes('norun'),
             invalid: flags.includes('invalid'),
+            hint: pendingHint || undefined,
         });
+        pendingHint = null;
     } else {
         proseBuf.push(tok);
     }
