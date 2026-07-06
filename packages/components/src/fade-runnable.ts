@@ -135,7 +135,7 @@ export class FadeRunnableElement extends HTMLElement {
 
     private setupDebugControls(): void {
         this.fadeEditor!.onBreakpointToggle((line) => this.toggleBreakpoint(line));
-        this.debugBtn = iconBtn('fade-runnable__btn', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug());
+        this.debugBtn = iconBtn('fade-runnable__btn fade-runnable__btn--debug', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug());
 
         this.debugBar = el('span', 'fade-runnable__debugbar');
         const step = (icon: string, title: string, fn: () => void) => {
@@ -523,6 +523,8 @@ function injectStyles(): void {
 /* The step strip only appears while a debug session is active. */
 .fade-runnable__debugbar { display: none; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
 .fade-runnable--debugging .fade-runnable__debugbar { display: inline-flex; }
+/* While a session is live the step strip drives things — hide the Debug button. */
+.fade-runnable--debugging .fade-runnable__btn--debug { display: none; }
 .fade-runnable__tb { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
 .fade-runnable__tb:hover:not(:disabled) { background: #3a3d41; }
 .fade-runnable__tb:disabled { opacity: 0.35; cursor: default; }

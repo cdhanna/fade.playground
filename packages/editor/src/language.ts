@@ -17,6 +17,11 @@ const TOKEN_TYPES = [
     'parameter', 'struct', 'type', 'operator', 'number', 'string',
 ];
 
+// The FadeBasic LSP classifies these reserved control keywords as `function`
+// semantic tokens (they'd render yellow, like a function name). We remap them
+// to `keyword` so all reserved words are consistently purple.
+const KEYWORDS_TAGGED_AS_FUNCTION = new Set(['FUNCTION', 'ENDFUNCTION', 'EXITFUNCTION']);
+
 // Per-token colors (VS Code dark palette) — injected as CSS for the
 // `.fade-token-<type>` classes the decorations carry.
 const DARK_COLORS: Record<string, string> = {
@@ -155,11 +160,15 @@ export async function applySemanticTokens(
     for (let i = 0; i + 4 < tokens.length; i += 5) {
         const dLine = tokens[i], dChar = tokens[i + 1], len = tokens[i + 2], typeIdx = tokens[i + 3];
         if (dLine > 0) { line += dLine; ch = dChar; } else { ch += dChar; }
-        const name = TOKEN_TYPES[typeIdx] ?? 'unknown';
-        decos.push({
-            range: new monaco.Range(line + 1, ch + 1, line + 1, ch + 1 + len),
-            options: { inlineClassName: 'fade-token-' + name },
-        });
+        let name = TOKEN_TYPES[typeIdx] ?? 'unknown';
+        const range = new monaco.Range(line + 1, ch + 1, line + 1, ch + 1 + len);
+        // The LSP labels the FUNCTION-declaration keywords as `function` (same
+        // color as a function *name*). They're control keywords — color them
+        // purple like FOR/SELECT/CASE so the reserved words read consistently.
+        if (name === 'function' && KEYWORDS_TAGGED_AS_FUNCTION.has(model.getValueInRange(range).toUpperCase())) {
+            name = 'keyword';
+        }
+        decos.push({ range, options: { inlineClassName: 'fade-token-' + name } });
     }
     return model.deltaDecorations(prev, decos);
 }
