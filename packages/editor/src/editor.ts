@@ -140,6 +140,10 @@ function ensureDebugCss(): void {
 .monaco-editor .fade-bp { background: radial-gradient(circle, #e51400 45%, transparent 50%); cursor: pointer; }
 .monaco-editor .fade-current-line { background: rgba(255, 221, 51, 0.14); }
 .monaco-editor .fade-current-line-glyph { background: radial-gradient(circle, #ffcc00 45%, transparent 50%); }
+/* The glyph margin toggles breakpoints on click — show a pointer over it
+   (including empty lines) so it reads as clickable. Line numbers stay default. */
+.monaco-editor .margin-view-overlays { cursor: pointer; }
+.monaco-editor .margin-view-overlays .line-numbers { cursor: default; }
 `;
     document.head.appendChild(style);
 }

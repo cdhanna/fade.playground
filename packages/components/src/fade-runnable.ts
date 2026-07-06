@@ -135,7 +135,7 @@ export class FadeRunnableElement extends HTMLElement {
 
     private setupDebugControls(): void {
         this.fadeEditor!.onBreakpointToggle((line) => this.toggleBreakpoint(line));
-        this.debugBtn = iconBtn('fade-runnable__btn fade-runnable__btn--debug', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug());
+        this.debugBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary fade-runnable__btn--debug', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug());
 
         this.debugBar = el('span', 'fade-runnable__debugbar');
         const step = (icon: string, title: string, fn: () => void) => {
@@ -155,7 +155,7 @@ export class FadeRunnableElement extends HTMLElement {
         const sidebar = el('div', 'fade-runnable__sidebar');
         const vars = section('Variables'); this.varsBody = vars.body; this.varsBody.innerHTML = emptyMsg('Not paused');
         const watch = section('Watch'); this.watchBody = watch.body;
-        watch.head.append(spacer(), iconBtn('fade-runnable__section-action', 'add', '', 'Add watch expression', () => this.promptWatch()));
+        watch.head.append(spacer(), iconBtn('fade-runnable__section-action', 'add', '', 'Add watch expression', (e) => { e.stopPropagation(); this.promptWatch(); }));
         const frames = section('Call Stack'); this.framesBody = frames.body; this.framesBody.innerHTML = emptyMsg('Not paused');
         const bps = section('Breakpoints'); this.bpBody = bps.body;
         sidebar.append(vars.root, watch.root, frames.root, bps.root);
@@ -356,11 +356,12 @@ export class FadeRunnableElement extends HTMLElement {
         const inp = document.createElement('input');
         inp.className = 'fade-runnable__watch-add';
         inp.placeholder = 'Expression to watch…';
+        const close = () => { if (inp.parentNode) inp.remove(); };
         inp.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { const v = inp.value.trim(); if (v) { this.watches.push(v); this.renderWatch(); void this.refreshWatch(); } inp.remove(); }
-            else if (e.key === 'Escape') inp.remove();
+            if (e.key === 'Enter') { const v = inp.value.trim(); if (v) { this.watches.push(v); this.renderWatch(); void this.refreshWatch(); } close(); }
+            else if (e.key === 'Escape') close();
         });
-        inp.addEventListener('blur', () => inp.remove());
+        inp.addEventListener('blur', close);
         this.watchBody!.prepend(inp);
         inp.focus();
     }
@@ -468,7 +469,7 @@ function escapeHtml(s: string): string {
 function el(tag: string, className: string): HTMLElement { const e = document.createElement(tag); e.className = className; return e; }
 function spacer(): HTMLElement { return el('span', 'fade-runnable__spacer'); }
 function emptyMsg(t: string): string { return `<div class="fade-runnable__empty">${escapeHtml(t)}</div>`; }
-function iconBtn(className: string, codicon: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
+function iconBtn(className: string, codicon: string, label: string, title: string, onClick: (e: MouseEvent) => void): HTMLButtonElement {
     const b = document.createElement('button');
     b.className = className; b.type = 'button'; b.title = title;
     const ic = document.createElement('span'); ic.className = `codicon codicon-${codicon}`;
@@ -510,22 +511,27 @@ function injectStyles(): void {
 .fade-runnable { display: block; border: 1px solid #333; border-radius: 6px; overflow: hidden; background: #1e1e1e; color: #d4d4d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fade-runnable__editor { height: 220px; }
 .fade-runnable__toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; background: #252526; border-top: 1px solid #333; }
-.fade-runnable__spacer { flex: 1; }
-.fade-runnable__btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; }
+.fade-runnable__spacer { flex: 1 1 auto; min-width: 0; }
+/* width/flex are pinned so host \`button {}\` styles (e.g. width:100%) can't
+   stretch these — the toolbar buttons are always content-width. */
+.fade-runnable__btn { flex: 0 0 auto; width: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; white-space: nowrap; }
 .fade-runnable__btn:hover:not(:disabled) { background: #4a4d51; }
 .fade-runnable__btn:disabled { opacity: 0.6; cursor: default; }
 .fade-runnable__btn--primary { background: #0e639c; }
 .fade-runnable__btn--primary:hover:not(:disabled) { background: #1177bb; }
 .fade-runnable__btn .codicon { font-size: 15px; }
-.fade-runnable__status { padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* flex: 0 1 auto so status yields to the step strip (never pushes it off the
+   right edge); min-width:0 lets it ellipsize. */
+.fade-runnable__status { flex: 0 1 auto; min-width: 0; padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fade-runnable__status--error { color: #f14c4c; }
 .fade-runnable__vm { display: block; width: 100%; height: 150px; border: 0; background: #1e1e1e; }
-/* The step strip only appears while a debug session is active. */
-.fade-runnable__debugbar { display: none; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
+/* The step strip only appears while a debug session is active. flex:none keeps
+   it fully visible regardless of the toolbar width. */
+.fade-runnable__debugbar { display: none; flex: none; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
 .fade-runnable--debugging .fade-runnable__debugbar { display: inline-flex; }
 /* While a session is live the step strip drives things — hide the Debug button. */
 .fade-runnable--debugging .fade-runnable__btn--debug { display: none; }
-.fade-runnable__tb { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
+.fade-runnable__tb { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
 .fade-runnable__tb:hover:not(:disabled) { background: #3a3d41; }
 .fade-runnable__tb:disabled { opacity: 0.35; cursor: default; }
 .fade-runnable__tb .codicon { font-size: 16px; }
@@ -538,32 +544,37 @@ function injectStyles(): void {
 .fade-runnable__section-head:hover { background: #2a2d2e; }
 .fade-runnable__twisty { color: #888; font-size: 14px; }
 .fade-runnable__section-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #ccc; }
-.fade-runnable__section-action { margin-left: auto; cursor: pointer; background: transparent; color: #bbb; border: 0; display: inline-flex; }
+.fade-runnable__section-action { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: #bbb; border: 0; display: inline-flex; }
 .fade-runnable__section-action:hover { color: #fff; }
-.fade-runnable__section-body { padding: 4px 8px 6px; max-height: 200px; overflow: auto; }
+/* No horizontal padding here — rows are full-bleed and carry their own 8px
+   inset, so each line (and its hover) spans the full column width. */
+.fade-runnable__section-body { padding: 4px 0 6px; max-height: 200px; overflow: auto; }
 .fade-runnable__section-body--collapsed { display: none; }
-.fade-runnable__empty { color: #777; font-style: italic; padding: 2px 0; }
-.fade-runnable__scope { color: #888; text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; }
-.fade-runnable__var { display: flex; gap: 8px; padding: 1px 0; align-items: center; }
+.fade-runnable__empty { color: #777; font-style: italic; padding: 2px 8px; }
+.fade-runnable__scope { color: #888; text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; padding: 0 8px; }
+.fade-runnable__var { display: flex; gap: 8px; padding: 1px 8px; align-items: center; }
+.fade-runnable__var:hover { background: #2a2d2e; }
 .fade-runnable__varname { color: #9CDCFE; }
 .fade-runnable__vartype { color: #569CD6; opacity: 0.6; }
 .fade-runnable__varval { color: #B5CEA8; margin-left: auto; cursor: text; border-radius: 3px; padding: 0 2px; }
 .fade-runnable__varval:hover { background: #2a2d2e; }
 .fade-runnable__var-edit { width: 90px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #007acc; border-radius: 3px; padding: 0 3px; font: inherit; font-size: 12px; }
-.fade-runnable__watch-item { display: flex; gap: 8px; padding: 1px 0; align-items: center; }
+.fade-runnable__watch-item { display: flex; gap: 8px; padding: 1px 8px; align-items: center; }
+.fade-runnable__watch-item:hover { background: #2a2d2e; }
 .fade-runnable__watch-expr { color: #9CDCFE; }
 .fade-runnable__watch-val { color: #B5CEA8; margin-left: auto; }
 .fade-runnable__watch-val--err { color: #f14c4c; font-style: italic; }
 .fade-runnable__watch-add { width: 100%; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 2px 6px; font: inherit; font-size: 12px; margin-bottom: 4px; }
-.fade-runnable__frame { display: flex; gap: 6px; padding: 2px 4px; border-radius: 3px; cursor: pointer; }
+.fade-runnable__frame { display: flex; gap: 6px; padding: 2px 8px; cursor: pointer; }
 .fade-runnable__frame:hover { background: #2a2d2e; }
 .fade-runnable__frame--active { background: #37373d; }
 .fade-runnable__frame-name { color: #dcdcaa; }
 .fade-runnable__frame-line { color: #888; margin-left: auto; }
-.fade-runnable__bp { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.fade-runnable__bp { display: flex; align-items: center; gap: 6px; padding: 2px 8px; }
+.fade-runnable__bp:hover { background: #2a2d2e; }
 .fade-runnable__bp-dot { width: 9px; height: 9px; border-radius: 50%; background: #e51400; flex: none; }
 .fade-runnable__bp-line { color: #d4d4d4; }
-.fade-runnable__row-remove { margin-left: auto; cursor: pointer; background: transparent; color: #888; border: 0; display: inline-flex; }
+.fade-runnable__row-remove { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: #888; border: 0; display: inline-flex; }
 .fade-runnable__row-remove:hover { color: #f14c4c; }
 /* Combined Output + Debug Console */
 .fade-runnable__console { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid #333; }

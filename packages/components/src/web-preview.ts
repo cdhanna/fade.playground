@@ -35,6 +35,20 @@ export async function armWebPreview(
     frame.src = `${base}web/index.html?preview=1`;
     await ready;
 
+    // The embedding component shows run/debug status in its own toolbar, so
+    // hide the VM page's built-in status header (avoids a second, stale status
+    // like "Running…" lingering under the toolbar's "program exited"). Also let
+    // the output document scroll so long program output gets a scrollbar. The
+    // iframe is same-origin (served from assetBase), so this is accessible.
+    try {
+        const doc = frame.contentDocument;
+        if (doc) {
+            const s = doc.createElement('style');
+            s.textContent = 'header{display:none!important}html,body{height:100%;margin:0;min-height:0!important}body{overflow:auto!important}';
+            doc.head.appendChild(s);
+        }
+    } catch { /* cross-origin (shouldn't happen for same-origin assetBase) — skip */ }
+
     // Bootstrap the standard web command library. FadeBasic.Lib.Web implements
     // the everyday commands (print, str$, math, …); the LSP knows them at
     // compile time, but the VM iframe needs the DLL *loaded* to bind them at
