@@ -11,7 +11,7 @@
 
 import '@vscode/codicons/dist/codicon.css';
 import { FadeRunner } from '@fadebasic/runtime';
-import { createFadeEditor, setDebugHoverEvaluator, type FadeEditor } from '@fadebasic/editor';
+import { createFadeEditor, setDebugHoverEvaluator, showCrashOverlay, hideCrashOverlay, summarizeCrash, extractInsIndex, type FadeEditor } from '@fadebasic/editor';
 import { armWebPreview } from './web-preview';
 import { getSharedRunner, getLspReady } from './runner-pool';
 
@@ -33,6 +33,7 @@ export class FadeRunnableElement extends HTMLElement {
     private hideRun = false;
     private debugging = false;
     private paused = false;
+    private fatal = false;
     private breakpoints = new Set<number>();
     private frames: StackFrame[] = [];
     private activeFrame = 0;
@@ -105,6 +106,7 @@ export class FadeRunnableElement extends HTMLElement {
     }
 
     disconnectedCallback(): void {
+        hideCrashOverlay();
         this.fadeEditor?.dispose();
         this.fadeEditor = undefined;
         if (this.debugging) setDebugHoverEvaluator(null);
@@ -211,7 +213,9 @@ export class FadeRunnableElement extends HTMLElement {
     private async startDebug(): Promise<void> {
         if (this.debugging || !this.runner || !this.iframe) return;
         this.debugging = true;
+        this.fatal = false;
         this.classList.add('fade-runnable--debugging');
+        hideCrashOverlay();
         this.setStatus('Loading runtime…');
         // Show the hovered symbol's live value while paused (VSCode behavior).
         setDebugHoverEvaluator(async (word) => {
@@ -256,11 +260,53 @@ export class FadeRunnableElement extends HTMLElement {
             return;
         }
         if (ev.type === 'REV_REQUEST_EXITED' || ev.type === 'complete') { this.stopDebug('program exited'); return; }
-        if (ev.type === 'error' || ev.type === 'REV_REQUEST_EXPLODE') {
-            let msg = 'runtime error';
-            if (ev.json) { try { msg = JSON.parse(ev.json)?.message || msg; } catch { /* keep default */ } }
-            this.appendRepl(msg, 'err');
-            this.stopDebug(msg);
+        if (ev.type === 'error' || ev.type === 'REV_REQUEST_EXPLODE') { await this.onFatal(ev.json ?? ''); }
+    }
+
+    // Fatal VM exception (divide-by-zero, out-of-bounds, …). Mirror the
+    // Playground: keep the session paused for post-mortem (locals/call stack
+    // stay live, step/continue disabled since the VM can't resume), and paint
+    // the red crash overlay on the failing line.
+    private async onFatal(raw: string): Promise<void> {
+        // The bridge wraps a mid-run Stop as an "interrupted by terminate"
+        // explode — that's a clean stop, not a real error.
+        if (/interrupted by terminate/i.test(raw)) { this.stopDebug('stopped'); return; }
+
+        const summary = summarizeCrash(raw);
+        const text = summary.detail ? `${summary.title} — ${summary.detail}` : summary.title;
+        this.appendRepl(summary.isSystem ? `[Internal] ${text}` : text, 'err');
+
+        this.paused = true;
+        this.fatal = true;
+        this.setStatus('runtime error', true);
+        this.setStepEnabled(false); // VM can't resume past the fault
+        if (this.replInput) this.replInput.disabled = false;
+        // Hydrate frames / locals / watch so the user can inspect the crash.
+        try { const res: any = await this.runner!.debugStackFrames(); this.frames = Array.isArray(res) ? res : (res?.stackFrames ?? []); } catch { this.frames = []; }
+        this.activeFrame = 0;
+        this.renderCallStack();
+        await this.refreshVars();
+        await this.refreshWatch();
+
+        // Failing line: the VM halts at the fault, so the top frame's line is
+        // the crash site. Fall back to resolving the instruction index.
+        let line: number | null = typeof this.frames[this.activeFrame]?.lineNumber === 'number'
+            ? this.frames[this.activeFrame].lineNumber + 1 : null;
+        if (line == null) {
+            const ins = extractInsIndex(summary.inner);
+            if (ins != null) { try { const r = await this.runner!.resolveInstruction(ins); if (r) line = r.lineNumber + 1; } catch { /* ignore */ } }
+        }
+        if (line != null && this.fadeEditor) {
+            this.fadeEditor.setCurrentLine(null);
+            showCrashOverlay({
+                editor: this.fadeEditor.editor,
+                line,
+                kind: summary.kind,
+                title: summary.title,
+                detail: summary.detail,
+                isSystem: summary.isSystem,
+                onAbort: () => this.stopDebug(''),
+            });
         }
     }
 
@@ -457,7 +503,9 @@ export class FadeRunnableElement extends HTMLElement {
     private stopDebug(status = ''): void {
         if (this.runner) { void this.runner.debugTerminate().catch(() => {}); this.runner.onDebugEvent = undefined; }
         setDebugHoverEvaluator(null);
+        hideCrashOverlay();
         this.debugging = false;
+        this.fatal = false;
         this.classList.remove('fade-runnable--debugging');
         this.paused = false;
         this.expandedVars.clear();
