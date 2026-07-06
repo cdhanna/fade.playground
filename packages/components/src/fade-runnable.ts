@@ -37,6 +37,7 @@ export class FadeRunnableElement extends HTMLElement {
     private activeFrame = 0;
     private watches: string[] = [];
     private debugBar?: HTMLElement;
+    private debugBtn?: HTMLButtonElement;
     private stepBtns: HTMLButtonElement[] = [];
     private varsBody?: HTMLElement;
     private watchBody?: HTMLElement;
@@ -82,8 +83,8 @@ export class FadeRunnableElement extends HTMLElement {
         this.iframe.className = 'fade-runnable__vm';
         this.iframe.setAttribute('title', 'Fade output');
 
-        toolbar.append(this.runBtn);
-        if (this.debugEnabled) this.setupDebugControls(toolbar);
+        if (this.debugEnabled) this.setupDebugControls();
+        this.assembleToolbar(toolbar);
 
         if (this.ide) this.layoutIde(editorHost, toolbar);
         else this.layoutStacked(editorHost, toolbar);
@@ -105,15 +106,24 @@ export class FadeRunnableElement extends HTMLElement {
 
     private layoutIde(editorHost: HTMLElement, toolbar: HTMLElement): void {
         editorHost.classList.add('fade-runnable__pane-editor');
-        const strip = toolbar.querySelector('.fade-runnable__debugbar');
-        if (strip) toolbar.insertBefore(this.statusEl!, strip); else toolbar.append(this.statusEl!);
+        // Status sits at the far left; the action group is right-aligned.
+        toolbar.insertBefore(this.statusEl!, toolbar.firstChild);
         this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole());
     }
 
-    // ── Toolbar: Run / Debug / Stop + step strip (codicons) ──────────────────
-    private setupDebugControls(toolbar: HTMLElement): void {
+    // ── Toolbar assembly: status (left) … step strip, Debug, Run (right) ─────
+    // Run is the primary action and lives at the far top-right corner, matching
+    // the Playground's header where Run/Debug sit on the right.
+    private assembleToolbar(toolbar: HTMLElement): void {
+        toolbar.append(spacer());
+        if (this.debugBar) toolbar.append(this.debugBar);
+        if (this.debugBtn) toolbar.append(this.debugBtn);
+        toolbar.append(this.runBtn!);
+    }
+
+    private setupDebugControls(): void {
         this.fadeEditor!.onBreakpointToggle((line) => this.toggleBreakpoint(line));
-        toolbar.append(iconBtn('fade-runnable__btn', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug()));
+        this.debugBtn = iconBtn('fade-runnable__btn', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug());
 
         this.debugBar = el('span', 'fade-runnable__debugbar');
         const step = (icon: string, title: string, fn: () => void) => {
@@ -126,7 +136,6 @@ export class FadeRunnableElement extends HTMLElement {
         step('debug-step-into', 'Step Into (F11)', () => this.doStep('in'));
         step('debug-step-out', 'Step Out (⇧F11)', () => this.doStep('out'));
         step('debug-stop', 'Stop (⇧F5)', () => this.stopDebug());
-        toolbar.append(spacer(), this.debugBar);
     }
 
     // ── Debug sidebar ─────────────────────────────────────────────────────────
@@ -550,7 +559,7 @@ function injectStyles(): void {
 .fade-runnable__repl-input { flex: 1; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
 .fade-runnable__repl-input:disabled { opacity: 0.5; }
 /* IDE layout — mini VSCode */
-.fade-runnable--ide { display: grid; height: 560px; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr 200px; grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
+.fade-runnable--ide { display: grid; height: min(80vh, 900px); min-height: 480px; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr minmax(140px, 26%); grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
 .fade-runnable--ide .fade-runnable__toolbar { grid-area: toolbar; border-top: 0; border-bottom: 1px solid #333; }
 .fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; border-top: 0; }
 .fade-runnable--ide .fade-runnable__pane-editor { grid-area: editor; height: 100%; }
