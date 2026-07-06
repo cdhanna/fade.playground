@@ -30,6 +30,7 @@ export class FadeRunnableElement extends HTMLElement {
     private ide = false;
 
     private debugEnabled = false;
+    private hideRun = false;
     private debugging = false;
     private paused = false;
     private breakpoints = new Set<number>();
@@ -76,12 +77,23 @@ export class FadeRunnableElement extends HTMLElement {
         });
 
         this.runBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary', 'play', 'Run', 'Run (⌘R)', () => void this.run());
+        // `hide-run`: show only the Debug button (Run is suppressed) — used by the
+        // homepage demo, which is all about the debugger.
+        this.hideRun = this.hasAttribute('hide-run') && this.debugEnabled;
 
         if (noRun) { this.append(editorHost, toolbar, this.statusEl); toolbar.append(this.runBtn); return; }
 
         this.iframe = document.createElement('iframe');
         this.iframe.className = 'fade-runnable__vm';
         this.iframe.setAttribute('title', 'Fade output');
+
+        // Pre-seed breakpoints from `breakpoints="11,14"` (1-based line numbers).
+        if (this.debugEnabled) {
+            for (const n of (this.getAttribute('breakpoints') ?? '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => n > 0)) {
+                this.breakpoints.add(n);
+            }
+            if (this.breakpoints.size) this.fadeEditor.setBreakpointLines([...this.breakpoints]);
+        }
 
         if (this.debugEnabled) this.setupDebugControls();
         this.assembleToolbar(toolbar);
@@ -118,7 +130,7 @@ export class FadeRunnableElement extends HTMLElement {
         toolbar.append(spacer());
         if (this.debugBar) toolbar.append(this.debugBar);
         if (this.debugBtn) toolbar.append(this.debugBtn);
-        toolbar.append(this.runBtn!);
+        if (!this.hideRun) toolbar.append(this.runBtn!);
     }
 
     private setupDebugControls(): void {
@@ -198,6 +210,7 @@ export class FadeRunnableElement extends HTMLElement {
     private async startDebug(): Promise<void> {
         if (this.debugging || !this.runner || !this.iframe) return;
         this.debugging = true;
+        this.classList.add('fade-runnable--debugging');
         this.setStatus('Loading runtime…');
         // Show the hovered symbol's live value while paused (VSCode behavior).
         setDebugHoverEvaluator(async (word) => {
@@ -409,6 +422,7 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.runner) { void this.runner.debugTerminate().catch(() => {}); this.runner.onDebugEvent = undefined; }
         setDebugHoverEvaluator(null);
         this.debugging = false;
+        this.classList.remove('fade-runnable--debugging');
         this.paused = false;
         this.frames = [];
         this.fadeEditor?.setCurrentLine(null);
@@ -506,7 +520,9 @@ function injectStyles(): void {
 .fade-runnable__status { padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fade-runnable__status--error { color: #f14c4c; }
 .fade-runnable__vm { display: block; width: 100%; height: 150px; border: 0; background: #1e1e1e; }
-.fade-runnable__debugbar { display: inline-flex; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
+/* The step strip only appears while a debug session is active. */
+.fade-runnable__debugbar { display: none; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
+.fade-runnable--debugging .fade-runnable__debugbar { display: inline-flex; }
 .fade-runnable__tb { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
 .fade-runnable__tb:hover:not(:disabled) { background: #3a3d41; }
 .fade-runnable__tb:disabled { opacity: 0.35; cursor: default; }
