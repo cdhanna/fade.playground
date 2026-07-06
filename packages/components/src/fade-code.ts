@@ -29,10 +29,23 @@ export class FadeCodeElement extends HTMLElement {
         const source = (this._code ?? this.getAttribute('code') ?? dedent(this.textContent ?? '')).replace(/\s+$/, '');
         const assetBase = this.getAttribute('asset-base') ?? '/runtime/';
 
-        // Instant coloring (keywords/strings/numbers) so there's no flash of
-        // unstyled code before the LSP responds.
-        this.innerHTML = `<pre class="fade-code__pre"><code>${highlightFadeStatic(source)}</code></pre>`;
+        // `commands` attr: extra command words to color as commands — for
+        // snippets whose commands come from a runtime we don't load here (e.g.
+        // MonoGame). Comma/space separated.
+        const cmdAttr = this.getAttribute('commands');
+        const cmds = cmdAttr
+            ? new Set(cmdAttr.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean))
+            : undefined;
+
+        // Instant coloring (keywords/strings/numbers, + any supplied commands)
+        // so there's no flash of unstyled code before the LSP responds.
+        this.innerHTML = `<pre class="fade-code__pre"><code>${highlightFadeStatic(source, cmds)}</code></pre>`;
         const codeEl = this.querySelector('code')!;
+
+        // With custom commands, keep the static coloring: the LSP only knows the
+        // web command set and would re-tokenize those words back to plain
+        // identifiers. (Display-only block, so no diagnostics are needed.)
+        if (cmds && cmds.size) return;
 
         // Upgrade to full semantic highlighting (command-aware) via the LSP —
         // but LAZILY. A docs page can have 100+ blocks; tokenizing them all up

@@ -101,12 +101,20 @@ const flushProse = () => {
 // breakpoint"). It's an HTML comment, so GitHub renders nothing — the hint is
 // only surfaced in the interactive Help UI.
 let pendingHint = null;
+let pendingCommands = null;
 const HINT_RE = /<!--\s*fade:hint\s+([\s\S]*?)\s*-->/i;
+// `<!-- fade:commands cls, sync, load image -->` — extra command words to
+// highlight for the NEXT snippet, without loading the runtime that defines
+// them. Split on commas/whitespace so multi-word commands contribute each word.
+const CMD_RE = /<!--\s*fade:commands\s+([\s\S]*?)\s*-->/i;
 
 for (const tok of tokens) {
     if (tok.type === 'html') {
-        const m = (tok.raw || tok.text || '').match(HINT_RE);
-        if (m) { pendingHint = m[1].trim().replace(/\s+/g, ' '); continue; } // consume; don't render
+        const raw = tok.raw || tok.text || '';
+        const hm = raw.match(HINT_RE);
+        if (hm) { pendingHint = hm[1].trim().replace(/\s+/g, ' '); continue; } // consume; don't render
+        const cm = raw.match(CMD_RE);
+        if (cm) { pendingCommands = cm[1].split(/[,\s]+/).map((w) => w.trim().toLowerCase()).filter(Boolean); continue; }
     }
     const lang = (tok.type === 'code' ? (tok.lang || '') : '').trim().toLowerCase();
     const isFade = lang === 'basic' || lang.startsWith('basic ');
@@ -120,8 +128,10 @@ for (const tok of tokens) {
             runnable: !flags.includes('norun'),
             invalid: flags.includes('invalid'),
             hint: pendingHint || undefined,
+            commands: pendingCommands && pendingCommands.length ? pendingCommands : undefined,
         });
         pendingHint = null;
+        pendingCommands = null;
     } else {
         proseBuf.push(tok);
     }
