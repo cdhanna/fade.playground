@@ -16,7 +16,7 @@ import { armWebPreview } from './web-preview';
 import { getSharedRunner, getLspReady } from './runner-pool';
 
 interface StackFrame { name: string; lineNumber: number; colNumber: number }
-interface DbgVar { id: number; name: string; type?: string; value: string }
+interface DbgVar { id: number; name: string; type?: string; value: string; fieldCount?: number; elementCount?: number }
 
 export class FadeRunnableElement extends HTMLElement {
     private runner?: FadeRunner;
@@ -41,6 +41,7 @@ export class FadeRunnableElement extends HTMLElement {
     private debugBtn?: HTMLButtonElement;
     private stepBtns: HTMLButtonElement[] = [];
     private varsBody?: HTMLElement;
+    private expandedVars = new Set<number>();
     private watchBody?: HTMLElement;
     private framesBody?: HTMLElement;
     private bpBody?: HTMLElement;
@@ -306,10 +307,43 @@ export class FadeRunnableElement extends HTMLElement {
         if (!any) this.varsBody.innerHTML = emptyMsg('No variables in scope');
     }
 
-    private varRow(v: DbgVar): HTMLElement {
+    private varRow(v: DbgVar, indent = 0): HTMLElement {
+        const wrap = el('div', 'fade-runnable__var-wrap');
         const row = el('div', 'fade-runnable__var');
+        row.style.paddingLeft = (8 + indent * 14) + 'px';
+
+        // Arrays / UDTs expand into children (fieldCount for struct members,
+        // elementCount for array elements) — fetched lazily via the runner.
+        const expandable = ((v.fieldCount ?? 0) + (v.elementCount ?? 0)) > 0;
+        const twisty = el('span', 'fade-runnable__var-twisty');
+        const childrenWrap = el('div', 'fade-runnable__var-children');
+        const setTwisty = (open: boolean) => {
+            twisty.className = 'fade-runnable__var-twisty' + (expandable ? ' codicon codicon-chevron-' + (open ? 'down' : 'right') : ' fade-runnable__var-twisty--empty');
+        };
+        setTwisty(this.expandedVars.has(v.id));
+        row.append(twisty);
+
         const name = el('span', 'fade-runnable__varname'); name.textContent = v.name;
         if (v.type) { const t = el('span', 'fade-runnable__vartype'); t.textContent = v.type; row.append(name, t); } else row.append(name);
+
+        const renderChildren = async () => {
+            const result = await this.runner!.debugExpandVariable(v.id);
+            childrenWrap.innerHTML = '';
+            for (const sub of (result?.scopes ?? [])) {
+                for (const child of (sub.variables ?? [])) childrenWrap.append(this.varRow(child as DbgVar, indent + 1));
+            }
+        };
+        const toggle = async () => {
+            if (!expandable) return;
+            if (this.expandedVars.has(v.id)) { this.expandedVars.delete(v.id); childrenWrap.innerHTML = ''; setTwisty(false); return; }
+            this.expandedVars.add(v.id); setTwisty(true);
+            try { await renderChildren(); } catch { /* leave collapsed on failure */ }
+        };
+        twisty.addEventListener('click', (e) => { e.stopPropagation(); void toggle(); });
+        if (expandable) { name.style.cursor = 'pointer'; name.addEventListener('click', (e) => { e.stopPropagation(); void toggle(); }); }
+        // Preserve expansion across refreshVars (step / set-value) — re-fetch.
+        if (expandable && this.expandedVars.has(v.id)) void renderChildren();
+
         const val = el('span', 'fade-runnable__varval'); val.textContent = v.value; val.title = 'Click to set value';
         // Click the value to edit it (VSCode behavior) → debugSetVariable.
         val.addEventListener('click', (e) => {
@@ -336,7 +370,8 @@ export class FadeRunnableElement extends HTMLElement {
             input.addEventListener('blur', () => void commit(true));
         });
         row.append(val);
-        return row;
+        wrap.append(row, childrenWrap);
+        return wrap;
     }
 
     private renderCallStack(): void {
@@ -425,6 +460,7 @@ export class FadeRunnableElement extends HTMLElement {
         this.debugging = false;
         this.classList.remove('fade-runnable--debugging');
         this.paused = false;
+        this.expandedVars.clear();
         this.frames = [];
         this.fadeEditor?.setCurrentLine(null);
         for (const b of this.stepBtns) b.disabled = true;
@@ -553,8 +589,12 @@ function injectStyles(): void {
 .fade-runnable__section-body--collapsed { display: none; }
 .fade-runnable__empty { color: #777; font-style: italic; padding: 2px 8px; }
 .fade-runnable__scope { color: #888; text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; padding: 0 8px; }
-.fade-runnable__var { display: flex; gap: 8px; padding: 1px 8px; align-items: center; }
+.fade-runnable__var-wrap { }
+.fade-runnable__var { display: flex; gap: 6px; padding: 1px 8px; align-items: center; }
 .fade-runnable__var:hover { background: #2a2d2e; }
+.fade-runnable__var-twisty { flex: 0 0 auto; width: 14px; display: inline-flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; }
+.fade-runnable__var-twisty--empty { cursor: default; }
+.fade-runnable__var-children { }
 .fade-runnable__varname { color: #9CDCFE; }
 .fade-runnable__vartype { color: #569CD6; opacity: 0.6; }
 .fade-runnable__varval { color: #B5CEA8; margin-left: auto; cursor: text; border-radius: 3px; padding: 0 2px; }
