@@ -1,22 +1,22 @@
 // <fade-runnable> — an editable Fade snippet with Run + output, and (with the
-// `debug` attribute) a VSCode-style debugger: breakpoint gutter, step controls,
-// Variables / Watch / Call Stack / Breakpoints, and a Debug Console REPL.
+// `debug` attribute) a VSCode-style debugger: breakpoint gutter, codicon step
+// controls, Variables (editable) / Watch / Call Stack / Breakpoints, a combined
+// Output + Debug Console, and debug-value hovers.
 //
-// Two layouts:
-//   default — stacked: editor, toolbar, output, debug sections below.
-//   layout="ide" — a mini VSCode: debugger sidebar (left), editor (right),
-//                  output + Debug Console (bottom), step controls (top-right).
+// Layouts: default (stacked) or layout="ide" (a mini VSCode — debugger sidebar
+// left, editor right, Output/Console bottom, step strip top-right).
 //
-// Source: the `code` property (best for generated pages), a `code` attribute,
-// or slotted text. Attributes: asset-base, readonly, autorun, no-run, debug,
-// layout, watch (comma-separated initial watch expressions).
+// Source: `code` property, `code` attribute, or slotted text. Attributes:
+// asset-base, readonly, autorun, no-run, debug, layout, watch.
 
+import '@vscode/codicons/dist/codicon.css';
 import { FadeRunner } from '@fadebasic/runtime';
-import { createFadeEditor, type FadeEditor } from '@fadebasic/editor';
+import { createFadeEditor, setDebugHoverEvaluator, type FadeEditor } from '@fadebasic/editor';
 import { armWebPreview } from './web-preview';
 import { getSharedRunner, getLspReady } from './runner-pool';
 
 interface StackFrame { name: string; lineNumber: number; colNumber: number }
+interface DbgVar { id: number; name: string; type?: string; value: string }
 
 export class FadeRunnableElement extends HTMLElement {
     private runner?: FadeRunner;
@@ -29,17 +29,15 @@ export class FadeRunnableElement extends HTMLElement {
     private _code?: string;
     private ide = false;
 
-    // Debug state
     private debugEnabled = false;
     private debugging = false;
     private paused = false;
-    private breakpoints = new Set<number>(); // 1-based lines
+    private breakpoints = new Set<number>();
     private frames: StackFrame[] = [];
     private activeFrame = 0;
     private watches: string[] = [];
     private debugBar?: HTMLElement;
     private stepBtns: HTMLButtonElement[] = [];
-    private sidebar?: HTMLElement;
     private varsBody?: HTMLElement;
     private watchBody?: HTMLElement;
     private framesBody?: HTMLElement;
@@ -76,7 +74,7 @@ export class FadeRunnableElement extends HTMLElement {
             lspReady: getLspReady(this.runner, assetBase),
         });
 
-        this.runBtn = mkBtn('fade-runnable__run', '▶ Run', 'Run (⌘R)', () => void this.run());
+        this.runBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary', 'play', 'Run', 'Run (⌘R)', () => void this.run());
 
         if (noRun) { this.append(editorHost, toolbar, this.statusEl); toolbar.append(this.runBtn); return; }
 
@@ -89,86 +87,66 @@ export class FadeRunnableElement extends HTMLElement {
 
         if (this.ide) this.layoutIde(editorHost, toolbar);
         else this.layoutStacked(editorHost, toolbar);
-
         if (this.hasAttribute('autorun')) void this.run();
     }
 
-    disconnectedCallback(): void { this.fadeEditor?.dispose(); this.fadeEditor = undefined; }
+    disconnectedCallback(): void {
+        this.fadeEditor?.dispose();
+        this.fadeEditor = undefined;
+        if (this.debugging) setDebugHoverEvaluator(null);
+    }
 
     // ── Layouts ──────────────────────────────────────────────────────────────
     private layoutStacked(editorHost: HTMLElement, toolbar: HTMLElement): void {
-        this.append(editorHost, toolbar, this.statusEl!, this.iframe!);
-        if (this.debugEnabled) {
-            const pane = el('div', 'fade-runnable__debugpane');
-            pane.append(this.buildSidebar(), this.buildConsole());
-            this.append(pane);
-        }
+        this.append(editorHost, toolbar, this.statusEl!);
+        if (this.debugEnabled) this.append(this.buildSidebar());
+        this.append(this.buildConsole());
     }
 
     private layoutIde(editorHost: HTMLElement, toolbar: HTMLElement): void {
         editorHost.classList.add('fade-runnable__pane-editor');
-        // Status flows inline in the toolbar, just left of the step strip
-        // (rather than a separate grid child that would overlap it).
         const strip = toolbar.querySelector('.fade-runnable__debugbar');
-        if (strip) toolbar.insertBefore(this.statusEl!, strip);
-        else toolbar.append(this.statusEl!);
-        const sidebar = this.buildSidebar();
-        const bottom = el('div', 'fade-runnable__bottom');
-        const outWrap = el('div', 'fade-runnable__outwrap');
-        outWrap.append(paneHeader('Output'), this.iframe!);
-        bottom.append(outWrap, this.buildConsole());
-        this.append(toolbar, sidebar, editorHost, bottom);
+        if (strip) toolbar.insertBefore(this.statusEl!, strip); else toolbar.append(this.statusEl!);
+        this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole());
     }
 
-    // ── Debug toolbar (Run/Debug + step strip) ───────────────────────────────
+    // ── Toolbar: Run / Debug / Stop + step strip (codicons) ──────────────────
     private setupDebugControls(toolbar: HTMLElement): void {
         this.fadeEditor!.onBreakpointToggle((line) => this.toggleBreakpoint(line));
-        toolbar.append(mkBtn('fade-runnable__debug', '🐞 Debug', 'Set a breakpoint, then Debug', () => void this.startDebug()));
+        toolbar.append(iconBtn('fade-runnable__btn', 'debug-alt', 'Debug', 'Set a breakpoint, then Debug (⌘D)', () => void this.startDebug()));
 
-        // Step strip — pushed to the top-right.
         this.debugBar = el('span', 'fade-runnable__debugbar');
-        const step = (glyph: string, title: string, fn: () => void) => {
-            const b = mkBtn('fade-runnable__stepbtn', glyph, title, fn);
+        const step = (icon: string, title: string, fn: () => void) => {
+            const b = iconBtn('fade-runnable__tb', icon, '', title, fn);
             b.disabled = true; this.stepBtns.push(b); this.debugBar!.append(b);
         };
-        step('▶', 'Continue (F5)', () => this.doContinue());
-        step('↷', 'Step Over (F10)', () => this.doStep('over'));
-        step('↴', 'Step Into (F11)', () => this.doStep('in'));
-        step('↳', 'Step Out (⇧F11)', () => this.doStep('out'));
-        step('■', 'Stop (⇧F5)', () => this.stopDebug());
+        step('debug-continue', 'Continue (F5)', () => this.doContinue());
+        step('debug-pause', 'Pause', () => void this.runner!.debugPause());
+        step('debug-step-over', 'Step Over (F10)', () => this.doStep('over'));
+        step('debug-step-into', 'Step Into (F11)', () => this.doStep('in'));
+        step('debug-step-out', 'Step Out (⇧F11)', () => this.doStep('out'));
+        step('debug-stop', 'Stop (⇧F5)', () => this.stopDebug());
         toolbar.append(spacer(), this.debugBar);
     }
 
-    // ── Debug sidebar (Variables / Watch / Call Stack / Breakpoints) ─────────
+    // ── Debug sidebar ─────────────────────────────────────────────────────────
     private buildSidebar(): HTMLElement {
         const sidebar = el('div', 'fade-runnable__sidebar');
-        this.sidebar = sidebar;
-
-        const vars = section('Variables');
-        this.varsBody = vars.body;
-        this.varsBody.innerHTML = emptyMsg('Not paused');
-
-        const watch = section('Watch');
-        this.watchBody = watch.body;
-        const addWatch = mkBtn('fade-runnable__section-action', '+', 'Add watch expression', () => this.promptWatch());
-        watch.head.append(spacer(), addWatch);
-
-        const frames = section('Call Stack');
-        this.framesBody = frames.body;
-        this.framesBody.innerHTML = emptyMsg('Not paused');
-
-        const bps = section('Breakpoints');
-        this.bpBody = bps.body;
-
+        const vars = section('Variables'); this.varsBody = vars.body; this.varsBody.innerHTML = emptyMsg('Not paused');
+        const watch = section('Watch'); this.watchBody = watch.body;
+        watch.head.append(spacer(), iconBtn('fade-runnable__section-action', 'add', '', 'Add watch expression', () => this.promptWatch()));
+        const frames = section('Call Stack'); this.framesBody = frames.body; this.framesBody.innerHTML = emptyMsg('Not paused');
+        const bps = section('Breakpoints'); this.bpBody = bps.body;
         sidebar.append(vars.root, watch.root, frames.root, bps.root);
-        this.renderWatch();
-        this.renderBreakpoints();
+        this.renderWatch(); this.renderBreakpoints();
         return sidebar;
     }
 
+    // ── Combined Output + Debug Console (single panel) ───────────────────────
     private buildConsole(): HTMLElement {
         const wrap = el('div', 'fade-runnable__console');
-        wrap.append(paneHeader('Debug Console'));
+        wrap.append(paneHeader('Output'));
+        wrap.append(this.iframe!);
         this.replLog = el('div', 'fade-runnable__repl-log');
         const row = el('div', 'fade-runnable__repl-row');
         const prompt = el('span', 'fade-runnable__repl-prompt'); prompt.textContent = '›';
@@ -202,7 +180,7 @@ export class FadeRunnableElement extends HTMLElement {
         for (const ln of lines) {
             const row = el('div', 'fade-runnable__bp');
             row.innerHTML = `<span class="fade-runnable__bp-dot"></span><span class="fade-runnable__bp-line">Line ${ln}</span>`;
-            row.append(mkBtn('fade-runnable__bp-remove', '×', 'Remove breakpoint', () => this.toggleBreakpoint(ln)));
+            row.append(iconBtn('fade-runnable__row-remove', 'close', '', 'Remove breakpoint', () => this.toggleBreakpoint(ln)));
             this.bpBody!.append(row);
         }
     }
@@ -211,16 +189,22 @@ export class FadeRunnableElement extends HTMLElement {
     private async startDebug(): Promise<void> {
         if (this.debugging || !this.runner || !this.iframe) return;
         this.debugging = true;
-        this.setStatus('Loading runtime…', 'out');
+        this.setStatus('Loading runtime…');
+        // Show the hovered symbol's live value while paused (VSCode behavior).
+        setDebugHoverEvaluator(async (word) => {
+            if (!this.paused || !this.runner) return null;
+            const r = await this.runner.debugEval(this.activeFrame, word);
+            return (r && r.id !== -1 && r.value != null) ? { value: String(r.value), type: r.type } : null;
+        });
         try {
             if (!this.armed) { await armWebPreview(this.runner, this.iframe, this.assetBase()); this.armed = true; }
             this.runner.onDebugEvent = (ev) => void this.onDebugEvent(ev as { type: string; json?: string });
-            this.setStatus('Debugging…', 'out');
+            this.setStatus('Debugging…');
             await this.runner.debugStart(this.fadeEditor!.getValue());
             await this.pushBreakpoints();
             await this.runner.debugContinue();
         } catch (e) {
-            this.setStatus(e instanceof Error ? e.message : String(e), 'error');
+            this.setStatus(e instanceof Error ? e.message : String(e), true);
             this.stopDebug();
         }
     }
@@ -237,7 +221,7 @@ export class FadeRunnableElement extends HTMLElement {
         this.setStepEnabled(false);
         if (this.replInput) this.replInput.disabled = true;
         this.fadeEditor?.setCurrentLine(null);
-        this.setStatus(status, 'out');
+        this.setStatus(status);
     }
 
     private async onDebugEvent(ev: { type: string; json?: string }): Promise<void> {
@@ -260,13 +244,10 @@ export class FadeRunnableElement extends HTMLElement {
     private async onPaused(status: string): Promise<void> {
         this.paused = true;
         this.activeFrame = 0;
-        this.setStatus(status, 'out');
+        this.setStatus(status);
         this.setStepEnabled(true);
         if (this.replInput) this.replInput.disabled = false;
-        try {
-            const res: any = await this.runner!.debugStackFrames();
-            this.frames = Array.isArray(res) ? res : (res?.stackFrames ?? []);
-        } catch { this.frames = []; }
+        try { const res: any = await this.runner!.debugStackFrames(); this.frames = Array.isArray(res) ? res : (res?.stackFrames ?? []); } catch { this.frames = []; }
         this.moveToFrameLine();
         this.renderCallStack();
         await this.refreshVars();
@@ -287,17 +268,53 @@ export class FadeRunnableElement extends HTMLElement {
         await this.refreshWatch();
     }
 
-    // ── Variables / Call Stack / Watch rendering ─────────────────────────────
+    // ── Variables (editable) ─────────────────────────────────────────────────
     private async refreshVars(): Promise<void> {
         if (!this.varsBody) return;
         let scopes: any[] = [];
         try { scopes = (await this.runner!.debugScopes(this.activeFrame))?.scopes ?? []; } catch { /* none */ }
-        const rows: string[] = [];
+        this.varsBody.innerHTML = '';
+        let any = false;
         for (const sc of scopes) {
-            if (sc.scopeName) rows.push(`<div class="fade-runnable__scope">${escapeHtml(sc.scopeName)}</div>`);
-            for (const v of (sc.variables ?? [])) rows.push(varRow(v.name, v.type, v.value));
+            const vars: DbgVar[] = sc.variables ?? [];
+            if (!vars.length) continue;
+            if (sc.scopeName) { const s = el('div', 'fade-runnable__scope'); s.textContent = sc.scopeName; this.varsBody.append(s); }
+            for (const v of vars) { this.varsBody.append(this.varRow(v)); any = true; }
         }
-        this.varsBody.innerHTML = rows.length ? rows.join('') : emptyMsg('No variables in scope');
+        if (!any) this.varsBody.innerHTML = emptyMsg('No variables in scope');
+    }
+
+    private varRow(v: DbgVar): HTMLElement {
+        const row = el('div', 'fade-runnable__var');
+        const name = el('span', 'fade-runnable__varname'); name.textContent = v.name;
+        if (v.type) { const t = el('span', 'fade-runnable__vartype'); t.textContent = v.type; row.append(name, t); } else row.append(name);
+        const val = el('span', 'fade-runnable__varval'); val.textContent = v.value; val.title = 'Click to set value';
+        // Click the value to edit it (VSCode behavior) → debugSetVariable.
+        val.addEventListener('click', (e) => {
+            if (!this.paused) return;
+            e.stopPropagation();
+            if (val.querySelector('input')) return;
+            const input = document.createElement('input');
+            input.className = 'fade-runnable__var-edit';
+            input.value = v.value; input.spellcheck = false;
+            val.textContent = ''; val.append(input); input.focus(); input.select();
+            let done = false;
+            const commit = async (apply: boolean) => {
+                if (done) return; done = true;
+                if (!apply) { val.textContent = v.value; return; }
+                const rhs = input.value;
+                try {
+                    const r = await this.runner!.debugSetVariable(this.activeFrame, v.id, rhs);
+                    this.appendRepl(`${v.name} = ${rhs}` + (r ? ` → ${r.value}` : ''), r && r.id === -1 ? 'err' : 'out');
+                } catch (err) { this.appendRepl(err instanceof Error ? err.message : String(err), 'err'); }
+                await this.refreshVars();
+                await this.refreshWatch();
+            };
+            input.addEventListener('keydown', (ke) => { if (ke.key === 'Enter') void commit(true); else if (ke.key === 'Escape') void commit(false); });
+            input.addEventListener('blur', () => void commit(true));
+        });
+        row.append(val);
+        return row;
     }
 
     private renderCallStack(): void {
@@ -312,6 +329,7 @@ export class FadeRunnableElement extends HTMLElement {
         });
     }
 
+    // ── Watch ────────────────────────────────────────────────────────────────
     private promptWatch(): void {
         const inp = document.createElement('input');
         inp.className = 'fade-runnable__watch-add';
@@ -328,15 +346,11 @@ export class FadeRunnableElement extends HTMLElement {
     private renderWatch(): void {
         if (!this.watchBody) return;
         this.watchBody.querySelectorAll('.fade-runnable__watch-item, .fade-runnable__empty').forEach((n) => n.remove());
-        if (!this.watches.length) {
-            const e = el('div', 'fade-runnable__empty'); e.textContent = 'No watches — click +';
-            this.watchBody.append(e);
-            return;
-        }
+        if (!this.watches.length) { const e = el('div', 'fade-runnable__empty'); e.textContent = 'No watches — click +'; this.watchBody.append(e); return; }
         this.watches.forEach((expr, i) => {
             const row = el('div', 'fade-runnable__watch-item');
             row.innerHTML = `<span class="fade-runnable__watch-expr">${escapeHtml(expr)}</span><span class="fade-runnable__watch-val">—</span>`;
-            row.append(mkBtn('fade-runnable__bp-remove', '×', 'Remove', () => { this.watches.splice(i, 1); this.renderWatch(); void this.refreshWatch(); }));
+            row.append(iconBtn('fade-runnable__row-remove', 'close', '', 'Remove', () => { this.watches.splice(i, 1); this.renderWatch(); void this.refreshWatch(); }));
             this.watchBody!.append(row);
         });
     }
@@ -361,13 +375,9 @@ export class FadeRunnableElement extends HTMLElement {
         if (!expr || !this.paused) return;
         this.appendRepl(`› ${expr}`, 'in');
         try {
-            // debugRepl RUNS the code (assignments take effect), unlike debugEval.
             const r = await this.runner!.debugRepl(this.activeFrame, expr);
             this.appendRepl(r ? String(r.value) : '(no result)', r && r.id === -1 ? 'err' : 'out');
-        } catch (err) {
-            this.appendRepl(err instanceof Error ? err.message : String(err), 'err');
-        }
-        // A repl statement may mutate state — refresh variables + watches.
+        } catch (err) { this.appendRepl(err instanceof Error ? err.message : String(err), 'err'); }
         await this.refreshVars();
         await this.refreshWatch();
     }
@@ -383,48 +393,48 @@ export class FadeRunnableElement extends HTMLElement {
     private setStepEnabled(on: boolean): void {
         for (const b of this.stepBtns) b.disabled = !on;
         const stop = this.stepBtns[this.stepBtns.length - 1];
-        if (stop) stop.disabled = false; // Stop stays live for the whole session
+        if (stop) stop.disabled = false;
     }
 
     private stopDebug(status = ''): void {
         if (this.runner) { void this.runner.debugTerminate().catch(() => {}); this.runner.onDebugEvent = undefined; }
+        setDebugHoverEvaluator(null);
         this.debugging = false;
         this.paused = false;
         this.frames = [];
         this.fadeEditor?.setCurrentLine(null);
-        this.setStepEnabled(false);
         for (const b of this.stepBtns) b.disabled = true;
         if (this.replInput) this.replInput.disabled = true;
         if (this.varsBody) this.varsBody.innerHTML = emptyMsg('Not paused');
         if (this.framesBody) this.framesBody.innerHTML = emptyMsg('Not paused');
         void this.refreshWatch();
-        this.setStatus(status, 'out');
+        this.setStatus(status);
     }
 
     // ── Run ──────────────────────────────────────────────────────────────────
     async run(): Promise<void> {
         if (this.running || !this.runner || !this.iframe) return;
         this.running = true;
-        if (this.runBtn) { this.runBtn.disabled = true; this.runBtn.textContent = '… Running'; }
-        this.setStatus('', 'out');
+        if (this.runBtn) this.runBtn.disabled = true;
+        this.setStatus('');
         try {
-            if (!this.armed) { this.setStatus('Loading runtime…', 'out'); await armWebPreview(this.runner, this.iframe, this.assetBase()); this.armed = true; this.setStatus('', 'out'); }
+            if (!this.armed) { this.setStatus('Loading runtime…'); await armWebPreview(this.runner, this.iframe, this.assetBase()); this.armed = true; this.setStatus(''); }
             const result = JSON.parse(await this.runner.run(this.fadeEditor!.getValue()));
-            if (result.compileError) this.setStatus(result.compileError, 'error');
-            else if (result.ok === false && result.error) this.setStatus(result.error, 'error');
+            if (result.compileError) this.setStatus(result.compileError, true);
+            else if (result.ok === false && result.error) this.setStatus(result.error, true);
         } catch (e) {
-            this.setStatus(e instanceof Error ? e.message : String(e), 'error');
+            this.setStatus(e instanceof Error ? e.message : String(e), true);
         } finally {
             this.running = false;
-            if (this.runBtn) { this.runBtn.disabled = false; this.runBtn.textContent = '▶ Run'; }
+            if (this.runBtn) this.runBtn.disabled = false;
         }
     }
 
     private assetBase(): string { return this.getAttribute('asset-base') ?? '/runtime/'; }
-    private setStatus(text: string, kind: 'out' | 'error'): void {
+    private setStatus(text: string, err = false): void {
         if (!this.statusEl) return;
         this.statusEl.textContent = text;
-        this.statusEl.className = `fade-runnable__status fade-runnable__status--${kind}`;
+        this.statusEl.className = 'fade-runnable__status' + (err ? ' fade-runnable__status--error' : '');
     }
 }
 
@@ -435,12 +445,12 @@ function escapeHtml(s: string): string {
 function el(tag: string, className: string): HTMLElement { const e = document.createElement(tag); e.className = className; return e; }
 function spacer(): HTMLElement { return el('span', 'fade-runnable__spacer'); }
 function emptyMsg(t: string): string { return `<div class="fade-runnable__empty">${escapeHtml(t)}</div>`; }
-function varRow(name: string, type: string | undefined, value: unknown): string {
-    return `<div class="fade-runnable__var"><span class="fade-runnable__varname">${escapeHtml(name)}</span>${type ? `<span class="fade-runnable__vartype">${escapeHtml(type)}</span>` : ''}<span class="fade-runnable__varval">${escapeHtml(String(value))}</span></div>`;
-}
-function mkBtn(className: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
+function iconBtn(className: string, codicon: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
     const b = document.createElement('button');
-    b.className = className; b.type = 'button'; b.textContent = label; b.title = title;
+    b.className = className; b.type = 'button'; b.title = title;
+    const ic = document.createElement('span'); ic.className = `codicon codicon-${codicon}`;
+    b.append(ic);
+    if (label) { const t = document.createElement('span'); t.className = 'fade-runnable__btn-label'; t.textContent = label; b.append(t); }
     b.addEventListener('click', onClick);
     return b;
 }
@@ -448,13 +458,13 @@ function paneHeader(title: string): HTMLElement { const h = el('div', 'fade-runn
 function section(title: string): { root: HTMLElement; head: HTMLElement; body: HTMLElement } {
     const root = el('div', 'fade-runnable__section');
     const head = el('div', 'fade-runnable__section-head');
-    const twisty = el('span', 'fade-runnable__twisty'); twisty.textContent = '▾';
+    const twisty = el('span', 'codicon codicon-chevron-down fade-runnable__twisty');
     const label = el('span', 'fade-runnable__section-title'); label.textContent = title;
     head.append(twisty, label);
     const body = el('div', 'fade-runnable__section-body');
     head.addEventListener('click', () => {
         const collapsed = body.classList.toggle('fade-runnable__section-body--collapsed');
-        twisty.textContent = collapsed ? '▸' : '▾';
+        twisty.className = 'codicon fade-runnable__twisty ' + (collapsed ? 'codicon-chevron-right' : 'codicon-chevron-down');
     });
     root.append(head, body);
     return { root, head, body };
@@ -476,41 +486,43 @@ function injectStyles(): void {
     style.textContent = `
 .fade-runnable { display: block; border: 1px solid #333; border-radius: 6px; overflow: hidden; background: #1e1e1e; color: #d4d4d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fade-runnable__editor { height: 220px; }
-.fade-runnable__toolbar { display: flex; gap: 8px; align-items: center; padding: 6px 8px; background: #252526; border-top: 1px solid #333; }
+.fade-runnable__toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; background: #252526; border-top: 1px solid #333; }
 .fade-runnable__spacer { flex: 1; }
-.fade-runnable__run { cursor: pointer; background: #0e639c; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; }
-.fade-runnable__run:hover:not(:disabled) { background: #1177bb; }
-.fade-runnable__run:disabled { opacity: 0.6; cursor: default; }
-.fade-runnable__debug { cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; }
-.fade-runnable__debug:hover { background: #4a4d51; }
-.fade-runnable__status { padding: 6px 8px; color: #d4d4d4; font-size: 13px; white-space: pre-wrap; }
-.fade-runnable__status:empty { display: none; }
+.fade-runnable__btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; }
+.fade-runnable__btn:hover:not(:disabled) { background: #4a4d51; }
+.fade-runnable__btn:disabled { opacity: 0.6; cursor: default; }
+.fade-runnable__btn--primary { background: #0e639c; }
+.fade-runnable__btn--primary:hover:not(:disabled) { background: #1177bb; }
+.fade-runnable__btn .codicon { font-size: 15px; }
+.fade-runnable__status { padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fade-runnable__status--error { color: #f14c4c; }
-.fade-runnable__vm { display: block; width: 100%; height: 160px; border: 0; border-top: 1px solid #333; background: #1e1e1e; }
-.fade-runnable__debugbar { display: inline-flex; gap: 2px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
-.fade-runnable__stepbtn { cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 26px; height: 24px; font-size: 14px; line-height: 1; }
-.fade-runnable__stepbtn:hover:not(:disabled) { background: #3a3d41; }
-.fade-runnable__stepbtn:disabled { opacity: 0.35; cursor: default; }
-/* Debug sidebar / sections */
-.fade-runnable__debugpane { border-top: 1px solid #333; }
-.fade-runnable__sidebar { background: #1e1e1e; font-size: 12px; }
-.fade-runnable__console { background: #1e1e1e; font-size: 12px; }
+.fade-runnable__vm { display: block; width: 100%; height: 150px; border: 0; background: #1e1e1e; }
+.fade-runnable__debugbar { display: inline-flex; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
+.fade-runnable__tb { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
+.fade-runnable__tb:hover:not(:disabled) { background: #3a3d41; }
+.fade-runnable__tb:disabled { opacity: 0.35; cursor: default; }
+.fade-runnable__tb .codicon { font-size: 16px; }
+.fade-runnable__tb .codicon-debug-continue { color: #89d185; }
+/* Debug pane / sidebar */
+.fade-runnable__sidebar { background: #1e1e1e; font-size: 12px; border-top: 1px solid #333; }
 .fade-runnable__pane-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #bbb; padding: 5px 8px; background: #252526; border-bottom: 1px solid #2b2b2b; }
 .fade-runnable__section { border-bottom: 1px solid #2b2b2b; }
 .fade-runnable__section-head { display: flex; align-items: center; gap: 4px; padding: 4px 8px; cursor: pointer; user-select: none; background: #252526; }
 .fade-runnable__section-head:hover { background: #2a2d2e; }
-.fade-runnable__twisty { color: #888; font-size: 10px; width: 12px; }
+.fade-runnable__twisty { color: #888; font-size: 14px; }
 .fade-runnable__section-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #ccc; }
-.fade-runnable__section-action { margin-left: auto; cursor: pointer; background: transparent; color: #bbb; border: 0; font-size: 14px; line-height: 1; width: 18px; }
+.fade-runnable__section-action { margin-left: auto; cursor: pointer; background: transparent; color: #bbb; border: 0; display: inline-flex; }
 .fade-runnable__section-action:hover { color: #fff; }
 .fade-runnable__section-body { padding: 4px 8px 6px; max-height: 200px; overflow: auto; }
 .fade-runnable__section-body--collapsed { display: none; }
 .fade-runnable__empty { color: #777; font-style: italic; padding: 2px 0; }
 .fade-runnable__scope { color: #888; text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; }
-.fade-runnable__var { display: flex; gap: 8px; padding: 1px 0; }
+.fade-runnable__var { display: flex; gap: 8px; padding: 1px 0; align-items: center; }
 .fade-runnable__varname { color: #9CDCFE; }
 .fade-runnable__vartype { color: #569CD6; opacity: 0.6; }
-.fade-runnable__varval { color: #B5CEA8; margin-left: auto; }
+.fade-runnable__varval { color: #B5CEA8; margin-left: auto; cursor: text; border-radius: 3px; padding: 0 2px; }
+.fade-runnable__varval:hover { background: #2a2d2e; }
+.fade-runnable__var-edit { width: 90px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #007acc; border-radius: 3px; padding: 0 3px; font: inherit; font-size: 12px; }
 .fade-runnable__watch-item { display: flex; gap: 8px; padding: 1px 0; align-items: center; }
 .fade-runnable__watch-expr { color: #9CDCFE; }
 .fade-runnable__watch-val { color: #B5CEA8; margin-left: auto; }
@@ -524,9 +536,12 @@ function injectStyles(): void {
 .fade-runnable__bp { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .fade-runnable__bp-dot { width: 9px; height: 9px; border-radius: 50%; background: #e51400; flex: none; }
 .fade-runnable__bp-line { color: #d4d4d4; }
-.fade-runnable__bp-remove { margin-left: auto; cursor: pointer; background: transparent; color: #888; border: 0; font-size: 14px; line-height: 1; }
-.fade-runnable__bp-remove:hover { color: #f14c4c; }
-.fade-runnable__repl-log { flex: 1; overflow: auto; white-space: pre-wrap; padding: 4px 8px; min-height: 40px; }
+.fade-runnable__row-remove { margin-left: auto; cursor: pointer; background: transparent; color: #888; border: 0; display: inline-flex; }
+.fade-runnable__row-remove:hover { color: #f14c4c; }
+/* Combined Output + Debug Console */
+.fade-runnable__console { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid #333; }
+.fade-runnable__repl-log { overflow: auto; white-space: pre-wrap; padding: 2px 8px; max-height: 90px; }
+.fade-runnable__repl-log:empty { display: none; }
 .fade-runnable__repl-line--in { color: #9CDCFE; }
 .fade-runnable__repl-line--out { color: #d4d4d4; }
 .fade-runnable__repl-line--err { color: #f14c4c; }
@@ -535,15 +550,13 @@ function injectStyles(): void {
 .fade-runnable__repl-input { flex: 1; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
 .fade-runnable__repl-input:disabled { opacity: 0.5; }
 /* IDE layout — mini VSCode */
-.fade-runnable--ide { display: grid; height: 560px; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr 190px; grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
+.fade-runnable--ide { display: grid; height: 560px; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr 200px; grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
 .fade-runnable--ide .fade-runnable__toolbar { grid-area: toolbar; border-top: 0; border-bottom: 1px solid #333; }
-.fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; }
+.fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; border-top: 0; }
 .fade-runnable--ide .fade-runnable__pane-editor { grid-area: editor; height: 100%; }
-.fade-runnable--ide .fade-runnable__bottom { grid-area: bottom; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid #333; min-height: 0; }
-.fade-runnable--ide .fade-runnable__outwrap { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #333; }
-.fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; border-top: 0; }
-.fade-runnable--ide .fade-runnable__console { display: flex; flex-direction: column; min-height: 0; }
-.fade-runnable--ide .fade-runnable__status { padding: 0 10px 0 4px; color: #bbb; font-size: 12px; white-space: nowrap; }
+.fade-runnable--ide .fade-runnable__console { grid-area: bottom; min-height: 0; }
+.fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; }
+.fade-runnable--ide .fade-runnable__status { padding: 0 10px 0 4px; }
 `;
     document.head.appendChild(style);
 }

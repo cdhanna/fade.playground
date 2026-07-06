@@ -5,3 +5,7 @@ declare module '*?worker' {
     const WorkerFactory: { new (): Worker };
     export default WorkerFactory;
 }
+
+// CSS imports (codicons) are handled by the consumer's bundler (Vite); this
+// keeps tsc happy.
+declare module '*.css';

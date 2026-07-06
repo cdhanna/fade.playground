@@ -25,6 +25,14 @@ const DARK_COLORS: Record<string, string> = {
     operator: '#D4D4D4', number: '#B5CEA8', string: '#CE9178',
 };
 
+// Debug-hover: when a session is paused, the hover provider evaluates the
+// hovered symbol through this callback and shows its live value. The component
+// sets it on pause and clears it on resume/stop. Module-level (not per-editor)
+// since only one debug session is active at a time across the shared runner.
+type DebugHoverEval = (word: string) => Promise<{ value: string; type?: string } | null>;
+let debugHoverEval: DebugHoverEval | null = null;
+export function setDebugHoverEvaluator(fn: DebugHoverEval | null): void { debugHoverEval = fn; }
+
 let attached = false;
 
 /** Register the `fade` language, theme, token CSS, and LSP providers against
@@ -85,6 +93,20 @@ export function attachFadeLanguage(runner: FadeRunner): void {
 
     monaco.languages.registerHoverProvider('fade', {
         provideHover: async (model, position) => {
+            // When a debug session is paused, show the hovered symbol's live
+            // value first (VSCode behavior), then fall through to LSP hover.
+            const word = model.getWordAtPosition(position);
+            if (word && debugHoverEval) {
+                try {
+                    const v = await debugHoverEval(word.word);
+                    if (v != null) {
+                        return {
+                            contents: [{ value: `**${word.word}** = \`${v.value}\`${v.type ? ` _(${v.type})_` : ''}` }],
+                            range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn),
+                        };
+                    }
+                } catch { /* fall through to LSP hover */ }
+            }
             const info = await runner.getHover(model.uri.toString(), position.lineNumber - 1, position.column - 1);
             if (!info) return null;
             return {

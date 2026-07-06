@@ -3,5 +3,5 @@
 
 export { createFadeEditor } from './editor';
 export type { FadeEditor, CreateFadeEditorOptions } from './editor';
-export { attachFadeLanguage, applySemanticTokens, applyDiagnostics } from './language';
+export { attachFadeLanguage, applySemanticTokens, applyDiagnostics, setDebugHoverEvaluator } from './language';
 export { renderTokenizedSnippet, highlightFadeStatic, injectSnippetCss, TOKEN_TYPE_CLASS } from './snippet';
