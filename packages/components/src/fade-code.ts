@@ -85,7 +85,7 @@ function injectStyles(): void {
     style.setAttribute('data-fade-code', '');
     style.textContent = `
 .fade-code__pre { margin: 0; background: #1e1e1e; color: #d4d4d4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333; overflow-x: auto; }
-fade-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; white-space: pre; }
+fade-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; white-space: pre; font-feature-settings: "calt" 0, "liga" 0; }
 `;
     document.head.appendChild(style);
 }

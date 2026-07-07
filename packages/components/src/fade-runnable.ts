@@ -10,7 +10,7 @@
 // asset-base, readonly, autorun, no-run, debug, layout, watch.
 
 import '@vscode/codicons/dist/codicon.css';
-import { FadeRunner } from '@fadebasic/runtime';
+import { FadeRunner, type TestEntry } from '@fadebasic/runtime';
 import { createFadeEditor, setDebugHoverEvaluator, showCrashOverlay, hideCrashOverlay, summarizeCrash, extractInsIndex, type FadeEditor } from '@fadebasic/editor';
 import { armWebPreview } from './web-preview';
 import { getSharedRunner, getLspReady } from './runner-pool';
@@ -25,6 +25,7 @@ export class FadeRunnableElement extends HTMLElement {
     private statusEl?: HTMLElement;
     private runBtn?: HTMLButtonElement;
     private armed = false;
+    private armingPromise?: Promise<void>;
     private running = false;
     private _code?: string;
     private ide = false;
@@ -40,7 +41,15 @@ export class FadeRunnableElement extends HTMLElement {
     private watches: string[] = [];
     private debugBar?: HTMLElement;
     private debugBtn?: HTMLButtonElement;
+    private compileErrors = 0;
     private stepBtns: HTMLButtonElement[] = [];
+    private tests: TestEntry[] = [];
+    private debugTestName?: string;       // the test being debugged (for pass/fail reporting)
+    private lastTestScan = '';            // signature of the source's TEST lines last scanned
+    private renderedTestSig = '';         // signature of the test names currently rendered
+    private testControls?: HTMLElement;   // [Debug test ▾] split button
+    private testMenu?: HTMLElement;       // dropdown of debug targets
+    private primaryKey = '';              // selected split-button action (defaults to first test)
     private varsBody?: HTMLElement;
     private expandedVars = new Set<number>();
     private watchBody?: HTMLElement;
@@ -63,6 +72,18 @@ export class FadeRunnableElement extends HTMLElement {
         this.ide = this.debugEnabled && this.getAttribute('layout') === 'ide';
         this.watches = (this.getAttribute('watch') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
+        // `hint`: surface contextual guidance as a leading comment line inside
+        // the editor (rather than a separate banner), so it reads as part of the
+        // program. `break-last` (opt-in) seeds a breakpoint on the last runnable
+        // line and adds a trailing blank line to edit into.
+        const hint = this.getAttribute('hint');
+        const breakLast = this.hasAttribute('break-last') && this.debugEnabled;
+        let value = source;
+        // The hint may arrive pre-wrapped (newlines); comment each line so a long
+        // nudge becomes several short comment lines rather than one runaway line.
+        if (hint) value = hint.split('\n').map((l) => '` ' + l).join('\n') + '\n' + value;
+        if (breakLast && !value.endsWith('\n')) value += '\n';
+
         this.textContent = '';
         this.classList.add('fade-runnable');
         if (this.ide) this.classList.add('fade-runnable--ide');
@@ -73,9 +94,10 @@ export class FadeRunnableElement extends HTMLElement {
 
         this.runner = getSharedRunner(assetBase);
         this.fadeEditor = createFadeEditor(editorHost, {
-            runner: this.runner, value: source, readonly,
+            runner: this.runner, value, readonly,
             diagnostics: !readonly, glyphMargin: this.debugEnabled,
             lspReady: getLspReady(this.runner, assetBase),
+            onDiagnostics: (errors) => this.onDiagnostics(errors),
         });
 
         this.runBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary', 'play', 'Run', 'Run (⌘R)', () => void this.run());
@@ -94,6 +116,10 @@ export class FadeRunnableElement extends HTMLElement {
             for (const n of (this.getAttribute('breakpoints') ?? '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => n > 0)) {
                 this.breakpoints.add(n);
             }
+            if (breakLast) {
+                const line = lastRunnableLine(value);   // value may have a hint comment prepended
+                if (line > 0) this.breakpoints.add(line);
+            }
             if (this.breakpoints.size) this.fadeEditor.setBreakpointLines([...this.breakpoints]);
         }
 
@@ -103,6 +129,10 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.ide) this.layoutIde(editorHost, toolbar);
         else this.layoutStacked(editorHost, toolbar);
         if (this.hasAttribute('autorun')) void this.run();
+
+        // Detect TEST blocks and, if any, swap the Debug button for a Run-Tests
+        // split button.
+        if (this.debugEnabled) this.detectTests();
     }
 
     disconnectedCallback(): void {
@@ -123,6 +153,13 @@ export class FadeRunnableElement extends HTMLElement {
         editorHost.classList.add('fade-runnable__pane-editor');
         // Status sits at the far left; the action group is right-aligned.
         toolbar.insertBefore(this.statusEl!, toolbar.firstChild);
+        // `closable`: a host-owned close button, rendered as a real toolbar child
+        // (far left) so it aligns with the status text and action buttons. It
+        // just emits an event; the host decides what closing means.
+        if (this.hasAttribute('closable')) {
+            const closeBtn = iconBtn('fade-runnable__btn', 'close', 'close', 'Close', () => this.dispatchEvent(new CustomEvent('fadeclose', { bubbles: true })));
+            toolbar.insertBefore(closeBtn, toolbar.firstChild);
+        }
         this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole());
     }
 
@@ -210,9 +247,13 @@ export class FadeRunnableElement extends HTMLElement {
     }
 
     // ── Session lifecycle ────────────────────────────────────────────────────
-    private async startDebug(): Promise<void> {
+    // `testName` focuses the debug session on a single TEST block; omit it to
+    // debug the main program.
+    private async startDebug(testName?: string): Promise<void> {
         if (this.debugging || !this.runner || !this.iframe) return;
+        this.closeTestMenu();
         this.debugging = true;
+        this.debugTestName = testName;   // for reporting pass/fail when it finishes
         this.fatal = false;
         this.classList.add('fade-runnable--debugging');
         hideCrashOverlay();
@@ -224,16 +265,134 @@ export class FadeRunnableElement extends HTMLElement {
             return (r && r.id !== -1 && r.value != null) ? { value: String(r.value), type: r.type } : null;
         });
         try {
-            if (!this.armed) { await armWebPreview(this.runner, this.iframe, this.assetBase()); this.armed = true; }
+            await this.ensureArmed();
             this.runner.onDebugEvent = (ev) => void this.onDebugEvent(ev as { type: string; json?: string });
-            this.setStatus('Debugging…');
-            await this.runner.debugStart(this.fadeEditor!.getValue());
+            this.setStatus(testName ? `Debugging test ${testName}…` : 'Debugging…');
+            const src = this.fadeEditor!.getValue();
+            const res = testName ? await this.runner.debugStartTest(src, testName) : await this.runner.debugStart(src);
+            // A proper start returns { ok: true, statementLines }. Some runtime
+            // builds don't yet implement debug-start-test and return {} — detect
+            // that so we don't hang in a silent "Debugging…" state.
+            if (!res || res.ok !== true) {
+                const msg = res && res.error ? res.error : 'Failed to start the debugger';
+                this.stopDebug();               // resets status…
+                this.setStatus(msg, true);      // …so set the message after
+                return;
+            }
             await this.pushBreakpoints();
             await this.runner.debugContinue();
         } catch (e) {
             this.setStatus(e instanceof Error ? e.message : String(e), true);
             this.stopDebug();
         }
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+    private applyTestNames(names: string[]): void {
+        const sig = names.join(',');
+        if (sig === this.renderedTestSig) return;
+        this.renderedTestSig = sig;
+        this.tests = names.map((name) => ({ name, isAbstract: false, fromParent: null, sourceLine: 0, sourceChar: 0 }));
+        this.renderTestControls();
+    }
+
+    // Discover TEST blocks. The real names come from the compiler (via the VM),
+    // because #MACRO/#TOKENIZE generate them — `TEST sample_[v]` becomes
+    // sample_42, sample_888, … and even editing an unrelated line (the values fed
+    // to the macro) can change them. So we re-fetch on ANY source change, not
+    // just when the TEST lines change. A cheap scan fills the button instantly
+    // the first time (before the VM is ready); after that the compiler's list
+    // is authoritative.
+    private async detectTests(): Promise<void> {
+        const src = this.fadeEditor?.getValue() ?? '';
+        if (src === this.lastTestScan) return;   // source unchanged
+        this.lastTestScan = src;
+
+        if (!/^[ \t]*TEST\b/im.test(src)) { this.applyTestNames([]); return; }
+
+        // Approximate list, shown only before we have any compiler-confirmed
+        // names — re-showing it on every edit would flicker macro names.
+        if (!this.renderedTestSig) {
+            const raw: string[] = [];
+            const re = /^[ \t]*TEST[ \t]+([A-Za-z_]\w*)/gim;
+            for (let m; (m = re.exec(src)); ) raw.push(m[1]);
+            this.applyTestNames([...new Set(raw)]);
+        }
+
+        try {
+            await this.ensureArmed();
+            const list = await this.runner!.listTests(src);
+            if (src !== this.lastTestScan) return;   // a newer edit is already being fetched
+            this.applyTestNames((list ?? []).filter((t) => !t.isAbstract).map((t) => t.name));
+        } catch { /* keep the last names */ }
+    }
+    // The set of selectable primary actions for the split button: debug a
+    // specific test (default), or debug the whole program. Running all tests is
+    // intentionally not offered here — this control is for debugging.
+    private testActions(): { key: string; label: string; icon: string; run: () => void }[] {
+        const acts = this.tests.map((t) => ({ key: `debug:${t.name}`, label: `Debug test: ${t.name}`, icon: 'debug-alt', run: () => void this.startDebug(t.name) }));
+        acts.push({ key: 'debug-program', label: 'Debug Program', icon: 'debug-alt', run: () => void this.startDebug() });
+        return acts;
+    }
+
+    // With tests present, replace the Debug button with a split button whose main
+    // half runs the SELECTED action and whose caret opens a menu to change it.
+    private renderTestControls(): void {
+        this.testControls?.remove();
+        this.testMenu?.remove();
+        this.testControls = undefined;
+        this.testMenu = undefined;
+        if (!this.tests.length || !this.debugBtn) {
+            if (this.debugBtn) this.debugBtn.style.display = '';
+            return;
+        }
+
+        this.debugBtn.style.display = 'none';   // its "debug program" action moves into the menu
+
+        // Default to (and fall back to) the first action — the first test — so a
+        // test snippet opens ready to debug that test. Also re-anchors if the
+        // selected test was edited away.
+        const actions = this.testActions();
+        if (!actions.some((a) => a.key === this.primaryKey)) this.primaryKey = actions[0].key;
+        const primary = actions.find((a) => a.key === this.primaryKey)!;
+
+        const group = el('span', 'fade-runnable__split');
+        const main = iconBtn('fade-runnable__btn fade-runnable__btn--primary fade-runnable__split-main', primary.icon, primary.label, primary.label, () => primary.run());
+        const caret = iconBtn('fade-runnable__btn fade-runnable__btn--primary fade-runnable__split-caret', 'chevron-down', '', 'Choose what this button does', (e) => { e.stopPropagation(); this.toggleTestMenu(); });
+        group.append(main, caret);
+        this.testControls = group;
+        this.debugBtn.parentElement?.insertBefore(group, this.debugBtn);
+    }
+
+    // The caret menu just CHANGES which action the main button runs — it doesn't
+    // start anything. Picking one updates the button; the user then clicks it.
+    private toggleTestMenu(): void {
+        if (this.testMenu) { this.closeTestMenu(); return; }
+        const menu = el('div', 'fade-runnable__menu');
+        for (const a of this.testActions()) {
+            const b = el('button', 'fade-runnable__menu-item' + (a.key === this.primaryKey ? ' is-selected' : '')) as HTMLButtonElement;
+            b.type = 'button';
+            b.innerHTML = `<span class="codicon codicon-check" style="visibility:${a.key === this.primaryKey ? 'visible' : 'hidden'}"></span><span>${a.label}</span>`;
+            b.addEventListener('click', (e) => { e.stopPropagation(); this.primaryKey = a.key; this.closeTestMenu(); this.renderTestControls(); });
+            menu.append(b);
+        }
+        this.testMenu = menu;
+        this.testControls?.append(menu);
+        // Dismiss on outside click / Escape.
+        setTimeout(() => {
+            const onDoc = (e: Event) => { if (!menu.contains(e.target as Node)) this.closeTestMenu(); };
+            const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') this.closeTestMenu(); };
+            (menu as any)._cleanup = () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+            document.addEventListener('mousedown', onDoc);
+            document.addEventListener('keydown', onKey);
+        }, 0);
+    }
+
+    private closeTestMenu(): void {
+        if (!this.testMenu) return;
+        (this.testMenu as any)._cleanup?.();
+        this.testMenu.remove();
+        this.testMenu = undefined;
     }
 
     private pushBreakpoints(): Promise<boolean> {
@@ -259,8 +418,28 @@ export class FadeRunnableElement extends HTMLElement {
             if (stepLanded) await this.onPaused('paused');
             return;
         }
-        if (ev.type === 'REV_REQUEST_EXITED' || ev.type === 'complete') { this.stopDebug('program exited'); return; }
+        if (ev.type === 'REV_REQUEST_EXITED' || ev.type === 'complete') {
+            if (this.debugTestName) { await this.reportTestResult(); return; }
+            this.stopDebug('program exited');
+            return;
+        }
         if (ev.type === 'error' || ev.type === 'REV_REQUEST_EXPLODE') { await this.onFatal(ev.json ?? ''); }
+    }
+
+    // A debugged test ran to completion — query its pass/fail verdict (while the
+    // session is still alive), then end the session and show the result.
+    private async reportTestResult(): Promise<void> {
+        const name = this.debugTestName;
+        let result = null;
+        try { result = await this.runner!.debugGetTestResult(); } catch { /* none */ }
+        this.stopDebug();   // terminates the session + resets status
+        if (result) {
+            const passed = result.passed;
+            const detail = !passed && result.failureMessage ? `: ${result.failureMessage}` : '';
+            this.setStatus(`${passed ? '✓' : '✗'} ${result.name || name} ${passed ? 'passed' : 'failed'}${detail}`, !passed);
+        } else {
+            this.setStatus(`test ${name} finished`);
+        }
     }
 
     // Fatal VM exception (divide-by-zero, out-of-bounds, …). Mirror the
@@ -505,6 +684,7 @@ export class FadeRunnableElement extends HTMLElement {
         setDebugHoverEvaluator(null);
         hideCrashOverlay();
         this.debugging = false;
+        this.debugTestName = undefined;
         this.fatal = false;
         this.classList.remove('fade-runnable--debugging');
         this.paused = false;
@@ -517,6 +697,7 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.framesBody) this.framesBody.innerHTML = emptyMsg('Not paused');
         void this.refreshWatch();
         this.setStatus(status);
+        this.updateActionsEnabled();   // reflect current compile state now debug is off
     }
 
     // ── Run ──────────────────────────────────────────────────────────────────
@@ -526,7 +707,7 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.runBtn) this.runBtn.disabled = true;
         this.setStatus('');
         try {
-            if (!this.armed) { this.setStatus('Loading runtime…'); await armWebPreview(this.runner, this.iframe, this.assetBase()); this.armed = true; this.setStatus(''); }
+            if (!this.armed) { this.setStatus('Loading runtime…'); await this.ensureArmed(); this.setStatus(''); }
             const result = JSON.parse(await this.runner.run(this.fadeEditor!.getValue()));
             if (result.compileError) this.setStatus(result.compileError, true);
             else if (result.ok === false && result.error) this.setStatus(result.error, true);
@@ -534,8 +715,40 @@ export class FadeRunnableElement extends HTMLElement {
             this.setStatus(e instanceof Error ? e.message : String(e), true);
         } finally {
             this.running = false;
-            if (this.runBtn) this.runBtn.disabled = false;
+            this.updateActionsEnabled();
         }
+    }
+
+    // ── Compile-error gating ─────────────────────────────────────────────────
+    // Diagnostics pass reports the current error count; Run/Debug can't produce
+    // anything from a program that won't compile, so gate them on a clean build.
+    private onDiagnostics(errors: number): void {
+        this.compileErrors = errors;
+        if (this.debugEnabled) this.detectTests();   // keep the test controls in sync with edits
+        this.updateActionsEnabled();
+    }
+
+    private updateActionsEnabled(): void {
+        const blocked = this.compileErrors > 0;
+        if (this.debugBtn && !this.debugging) {
+            this.debugBtn.disabled = blocked;
+            this.debugBtn.title = blocked ? 'Fix the errors in the code to debug' : 'Set a breakpoint, then Debug (⌘D)';
+        }
+        if (this.runBtn && !this.running) this.runBtn.disabled = blocked;
+        // Also gate the Run-Tests split button (present only for test snippets).
+        if (this.testControls && !this.running && !this.debugging) {
+            for (const b of this.testControls.querySelectorAll('button')) (b as HTMLButtonElement).disabled = blocked;
+            if (blocked) this.closeTestMenu();
+        }
+    }
+
+    // Boot the VM iframe once, sharing a single in-flight promise so concurrent
+    // callers (e.g. rapid edits re-listing tests while Debug also arms) don't
+    // double-arm.
+    private ensureArmed(): Promise<void> {
+        if (this.armed || !this.iframe) return Promise.resolve();
+        this.armingPromise ??= armWebPreview(this.runner!, this.iframe, this.assetBase()).then(() => { this.armed = true; });
+        return this.armingPromise;
     }
 
     private assetBase(): string { return this.getAttribute('asset-base') ?? '/runtime/'; }
@@ -585,6 +798,19 @@ function dedent(s: string): string {
     return lines.map((l) => l.slice(indent)).join('\n');
 }
 
+// The 1-based line number of the program's last runnable statement — the last
+// line that isn't blank or a pure comment (`… or REM …). Used by `break-last`
+// to drop a breakpoint where a reader can inspect final state. 0 if none.
+function lastRunnableLine(source: string): number {
+    const lines = source.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const t = lines[i].trim();
+        if (!t || t.startsWith('`') || /^rem\b/i.test(t)) continue;
+        return i + 1;
+    }
+    return 0;
+}
+
 function injectStyles(): void {
     if (typeof document === 'undefined') return;
     // Find-or-create a single <style>, and always refresh its contents. Not a
@@ -601,10 +827,28 @@ function injectStyles(): void {
    stretch these — the toolbar buttons are always content-width. */
 .fade-runnable__btn { flex: 0 0 auto; width: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; white-space: nowrap; }
 .fade-runnable__btn:hover:not(:disabled) { background: #4a4d51; }
-.fade-runnable__btn:disabled { opacity: 0.6; cursor: default; }
+.fade-runnable__btn:disabled { opacity: 0.5; cursor: not-allowed; background: #3a3d41; color: #9aa0a6; }
 .fade-runnable__btn--primary { background: #0e639c; }
 .fade-runnable__btn--primary:hover:not(:disabled) { background: #1177bb; }
 .fade-runnable__btn .codicon { font-size: 15px; }
+/* Run-Tests split button: a main action fused to a caret. */
+.fade-runnable__split { position: relative; display: inline-flex; flex: 0 0 auto; }
+.fade-runnable__split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.fade-runnable__split-caret { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 4px 6px; margin-left: 1px; }
+.fade-runnable__split-caret .codicon { font-size: 13px; }
+.fade-runnable__menu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 180px;
+    background: #252526; border: 1px solid #454545; border-radius: 6px; padding: 4px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 1px;
+}
+.fade-runnable__menu-item {
+    width: 100%; display: flex; align-items: center; gap: 6px; text-align: left; background: transparent;
+    color: #d4d4d4; border: 0; border-radius: 4px; padding: 5px 10px; font: inherit; font-size: 12px;
+    cursor: pointer; white-space: nowrap;
+}
+.fade-runnable__menu-item .codicon { font-size: 13px; flex: 0 0 auto; }
+.fade-runnable__menu-item.is-selected { color: #fff; }
+.fade-runnable__menu-item:hover { background: #04395e; color: #fff; }
 /* flex: 0 1 auto so status yields to the step strip (never pushes it off the
    right edge); min-width:0 lets it ellipsize. */
 .fade-runnable__status { flex: 0 1 auto; min-width: 0; padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -686,7 +930,9 @@ function injectStyles(): void {
 .fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; border-top: 0; }
 .fade-runnable--ide .fade-runnable__pane-editor { grid-area: editor; height: 100%; }
 .fade-runnable--ide .fade-runnable__console { grid-area: bottom; min-height: 0; }
-.fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; }
+/* min-height:0 so the iframe (intrinsic 150px, min-height:auto by default)
+   can shrink and leave room for the REPL row below it in the console. */
+.fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; min-height: 0; }
 .fade-runnable--ide .fade-runnable__status { padding: 0 10px 0 4px; }
 `;
 }

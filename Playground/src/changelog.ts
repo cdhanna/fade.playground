@@ -34,6 +34,23 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
         {
+            version: '0.6.0',
+            date: '2026-07-02',
+            added: [
+                'Right clicking file shows `copy path` and `copy filename` buttons',
+            ],
+            fixed: [
+                'Renaming files uses inline text box, instead of popup.',
+                'Deleting file confirmation uses popup instead of browser alert'
+            ],
+            changed: [
+                
+            ],
+            notes: [
+                'Internal refactor of components. '
+            ]
+        },
+        {
             version: '0.5.0',
             date: '2026-07-02',
             added: [

@@ -1473,6 +1473,23 @@
         #file-list li > .file-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
         #file-list li:hover { background: var(--hover-bg); }
         #file-list li.active { background: var(--list-active-bg); }
+        /* Inline rename editor — replaces the .file-label in place. Sized
+           to fill the row so it reads as editing the label itself. */
+        #file-list li > .file-rename-input {
+            flex: 1;
+            min-width: 0;
+            font: inherit;
+            color: var(--fg);
+            background: var(--bg-1);
+            border: 1px solid #007fd4;
+            border-radius: 2px;
+            padding: 0 0.2rem;
+            margin: -1px 0;
+            outline: none;
+        }
+        #file-list li > .file-rename-input.file-rename-invalid {
+            border-color: #f14c4c;
+        }
         #file-list li.manifest > .file-label { color: var(--fg); font-style: italic; }
         #file-list .file-lock { color: var(--fg-muted); font-size: 0.8rem; }
         /* Tree rendering — folders have a clickable chevron; files have
@@ -3947,6 +3964,70 @@
             z-index: 1100;
         }
         .changelog-overlay[hidden] { display: none; }
+
+        /* ─── Confirmation dialog (VSCode-style) ─────────────────────────── */
+        /* Used for destructive actions (delete file/folder) instead of the
+           browser's window.confirm. Built + torn down in main.ts. */
+        .confirm-overlay {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding-top: 18vh;
+            background: rgba(0,0,0,0.5);
+            z-index: 1200;
+        }
+        .confirm-modal {
+            width: min(440px, 92vw);
+            background: var(--bg-1);
+            border: 1px solid var(--border-2);
+            border-radius: 6px;
+            box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+            padding: 1rem 1.1rem 0.9rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .confirm-title {
+            font-size: 0.92rem;
+            font-weight: 600;
+            color: var(--fg);
+        }
+        .confirm-body {
+            font-size: 0.82rem;
+            color: var(--fg-muted);
+            line-height: 1.45;
+        }
+        .confirm-foot {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.5rem;
+            margin-top: 0.4rem;
+        }
+        .confirm-btn {
+            font: inherit;
+            font-size: 0.82rem;
+            padding: 0.32rem 0.9rem;
+            border-radius: 3px;
+            border: 1px solid var(--border-2);
+            background: var(--bg-2);
+            color: var(--fg);
+            cursor: pointer;
+        }
+        .confirm-btn:hover { border-color: var(--fg-muted); }
+        .confirm-primary {
+            background: #0e639c;
+            border-color: #0e639c;
+            color: #fff;
+        }
+        .confirm-primary:hover { background: #1177bb; border-color: #1177bb; }
+        .confirm-primary:focus-visible { outline: 1px solid #fff; outline-offset: 1px; }
+        .confirm-danger {
+            background: #c4331d;
+            border-color: #c4331d;
+        }
+        .confirm-danger:hover { background: #d43a22; border-color: #d43a22; }
         .changelog-modal {
             background: var(--bg-1);
             border: 1px solid var(--border-2);

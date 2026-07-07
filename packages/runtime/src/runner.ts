@@ -552,6 +552,9 @@ export class FadeRunner {
         });
     }
 
+    // Tests are discovered by the compiler (macro expansion produces the real
+    // per-iteration names like `sample_0`), which lives on the VM side — so this
+    // routes through postVm, not the LSP worker. Requires the VM iframe armed.
     async listTests(source: string): Promise<TestEntry[]> {
         const id = ++this.nextId;
         return new Promise<TestEntry[]>((resolve) => {
@@ -561,7 +564,10 @@ export class FadeRunner {
                     resolve(Array.isArray(parsed) ? parsed : []);
                 } catch { resolve([]); }
             });
-            this.worker.postMessage({ type: 'list-tests', id, source });
+            if (!this.postVm({ type: 'list-tests', id, source })) {
+                this.pending.delete(id);
+                resolve([]);   // VM not armed yet
+            }
         });
     }
 

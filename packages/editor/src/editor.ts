@@ -37,6 +37,10 @@ export interface CreateFadeEditorOptions {
     lspReady?: Promise<void>;
     /** Extra monaco editor options. */
     editorOptions?: monaco.editor.IStandaloneEditorConstructionOptions;
+    /** Called after each diagnostics pass with the current error-marker count
+     *  (0 = clean). Lets a host gate actions like Run/Debug on a compilable
+     *  document. Only fires when diagnostics are enabled. */
+    onDiagnostics?: (errorCount: number) => void;
 }
 
 export interface FadeEditor {
@@ -70,8 +74,17 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         automaticLayout: true,
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
+        // Let the page scroll when the editor has nothing (more) to scroll —
+        // otherwise Monaco swallows the wheel and an embedded editor feels
+        // "stuck" as you scroll past it.
+        scrollbar: { alwaysConsumeMouseWheel: false },
         glyphMargin: opts.glyphMargin ?? false,
         fontSize: 14,
+        // Match the static snippet highlighter (fade-code) exactly — same
+        // family, size, and line box — so text that morphs from a snippet into
+        // this editor doesn't shift metrics at the handoff.
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        lineHeight: 19,
         ...opts.editorOptions,
     });
 
@@ -84,7 +97,15 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
     const refresh = async () => {
         opts.runner.setDocument(uri.toString(), model.getValue());
         decorations = await applySemanticTokens(opts.runner, model, decorations);
-        if (wantDiagnostics) await applyDiagnostics(opts.runner, model);
+        if (wantDiagnostics) {
+            await applyDiagnostics(opts.runner, model);
+            if (opts.onDiagnostics && !model.isDisposed()) {
+                const errors = monaco.editor
+                    .getModelMarkers({ resource: uri, owner: 'fade' })
+                    .filter((m) => m.severity === monaco.MarkerSeverity.Error).length;
+                opts.onDiagnostics(errors);
+            }
+        }
     };
 
     // Initial pass — wait until the LSP is command-aware so the first tokenize

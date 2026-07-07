@@ -1088,6 +1088,9 @@ interface ProjectOps {
     removeSource(name: string): Promise<void>;
     revealSourceInManifest(name: string): Promise<void>;
     renameFile(name: string): Promise<void>;
+    /** Inline-rename a folder in place (VSCode-style editor on the row).
+     *  Same experience as renameFile; moves the whole subtree. */
+    renameFolder(path: string): Promise<void>;
     deleteFile(name: string): Promise<void>;
     /** Create an empty folder at the given path (root-relative,
      *  slashes allowed for nested creation). No-op if it exists. */
@@ -1526,8 +1529,20 @@ function showFileContextMenu(x: number, y: number, fileName: string) {
         }
         addSeparator();
     }
-    addItem(`Rename "${fileName}"…`, () => ops.renameFile(fileName));
-    addItem(`Delete "${fileName}"`, () => ops.deleteFile(fileName));
+    // Copy helpers for pulling asset references into fade code without
+    // retyping the folder structure. Both drop the final extension:
+    //   assets/img/hero.png → path "assets/img/hero", name "hero"
+    // Extension = the last dot in the basename; a leading-dot dotfile
+    // (`.gitignore`) has no extension to strip.
+    const slash = fileName.lastIndexOf('/');
+    const dot = fileName.lastIndexOf('.');
+    const pathNoExt = dot > slash + 1 ? fileName.slice(0, dot) : fileName;
+    const nameNoExt = pathNoExt.slice(slash + 1);
+    addItem('Copy file name', () => { void navigator.clipboard?.writeText(nameNoExt); });
+    addItem('Copy file path', () => { void navigator.clipboard?.writeText(pathNoExt); });
+    addSeparator();
+    addItem(`Rename`, () => ops.renameFile(fileName));
+    addItem(`Delete`, () => ops.deleteFile(fileName));
     document.body.append(menu);
     menu.style.left = `${x}px`;
     menu.style.top = `${y}px`;
@@ -1553,6 +1568,73 @@ function closeAnyFileMenu() {
         (m as any).__cleanup?.();
         m.remove();
     }
+}
+
+/** VSCode-style modal confirmation. Resolves true on confirm, false on
+ *  cancel / Escape / backdrop click. Replaces window.confirm for
+ *  destructive actions so they match the app's design language rather
+ *  than showing browser chrome. */
+function confirmDialog(opts: {
+    title: string;
+    body?: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    /** Style the primary button as destructive (red). */
+    danger?: boolean;
+}): Promise<boolean> {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'confirm-overlay';
+        const modal = document.createElement('div');
+        modal.className = 'confirm-modal';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+
+        const titleEl = document.createElement('div');
+        titleEl.className = 'confirm-title';
+        titleEl.textContent = opts.title;
+        modal.append(titleEl);
+        if (opts.body) {
+            const bodyEl = document.createElement('div');
+            bodyEl.className = 'confirm-body';
+            bodyEl.textContent = opts.body;
+            modal.append(bodyEl);
+        }
+
+        const foot = document.createElement('div');
+        foot.className = 'confirm-foot';
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'confirm-btn confirm-primary' + (opts.danger ? ' confirm-danger' : '');
+        confirmBtn.textContent = opts.confirmLabel ?? 'OK';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'confirm-btn';
+        cancelBtn.textContent = opts.cancelLabel ?? 'Cancel';
+        // VSCode order: primary action first, Cancel to its right.
+        foot.append(confirmBtn, cancelBtn);
+        modal.append(foot);
+        overlay.append(modal);
+        document.body.append(overlay);
+
+        let done = false;
+        const close = (result: boolean) => {
+            if (done) return;
+            done = true;
+            document.removeEventListener('keydown', onKey, true);
+            overlay.remove();
+            resolve(result);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') { e.preventDefault(); close(false); }
+            else if (e.key === 'Enter') { e.preventDefault(); close(true); }
+        };
+        confirmBtn.addEventListener('click', () => close(true));
+        cancelBtn.addEventListener('click', () => close(false));
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(false); });
+        document.addEventListener('keydown', onKey, true);
+        confirmBtn.focus();
+    });
 }
 
 // Right-click menu for an editor tab. Reuses the source-badge-menu chrome
@@ -1689,13 +1771,11 @@ function showFolderContextMenu(x: number, y: number, folderPath: string) {
     sep.className = 'source-badge-sep';
     menu.append(sep);
     addItem('Rename folder…', () => {
-        const newPath = window.prompt(`Rename "${folderPath}" to:`, folderPath);
-        if (!newPath || newPath === folderPath) return;
-        void projectOps!.renamePath(folderPath, newPath.trim())
-            .catch((e: unknown) => console.warn('[fade] rename folder failed', e));
+        projectOps!.renameFolder(folderPath);
     });
     addItem('Delete folder…', () => {
-        if (!confirm(`Delete "${folderPath}" and ALL its contents? This can't be undone.`)) return;
+        // deleteFile owns the confirm (VSCode-style dialog) for both files
+        // and folders, so no browser confirm here.
         void projectOps!.deleteFile(folderPath)
             .catch((e: unknown) => console.warn('[fade] delete folder failed', e));
     });
@@ -3564,6 +3644,199 @@ async function bootstrap() {
         await refreshFadeProject();
     }
 
+    // Do the actual rename once a new name is chosen: move the file in
+    // OPFS, swap the Monaco model to the new URI, follow the open tab,
+    // keep fade.json:sources in sync, and redraw. Returns an error
+    // message on failure (surfaced inline by the caller) or null on
+    // success. Never throws — the inline editor stays open on error.
+    async function commitRename(oldName: string, newName: string): Promise<string | null> {
+        if (newName === oldName) return null;
+        try {
+            await workspace.rename(oldName, newName);
+        } catch (e: any) {
+            return e?.message ?? String(e);
+        }
+        // Monaco models are immutable on URI — swap by disposing the
+        // old model and creating a new one with the new URI. Any
+        // decorations + markers reattach via the polling loop's next
+        // LSP push.
+        const oldUri = monaco.Uri.file(`/workspace/${oldName}`);
+        const newUri = monaco.Uri.file(`/workspace/${newName}`);
+        const oldModel = monaco.editor.getModel(oldUri);
+        const text = oldModel ? oldModel.getValue() : await workspace.read(newName);
+        const wasActive = activeName === oldName;
+        const wasInEditor = editor?.getModel() === oldModel;
+        // Drop old model + virtualFs registration.
+        if (oldModel) oldModel.dispose();
+        unregisterVirtualFile(oldUri);
+        // Recreate at new URI.
+        const newModel = monaco.editor.createModel(text, languageFor(newName), newUri);
+        // Move tab entry if open.
+        const oldTab = tabs.get(oldName);
+        if (oldTab) {
+            tabs.delete(oldName);
+            const newTab: Tab = { name: newName, model: newModel, dirty: false };
+            newTab.model.onDidChangeContent(() => {
+                newTab.dirty = true;
+                sharingController?.setHasDirtyTabs(true);
+                clearTimeout(newTab.saveTimer);
+                newTab.saveTimer = window.setTimeout(async () => {
+                    try {
+                        await workspace.write(newTab.name, newTab.model.getValue());
+                        newTab.dirty = false;
+                        if (!anyTabDirty()) sharingController?.setHasDirtyTabs(false);
+                        sharingController?.invalidateHashFor(newTab.name);
+                        renderTabs();
+                    } catch (e) {
+                        console.error('[fade] save failed for', newTab.name, e);
+                    }
+                }, 600);
+                renderTabs();
+            });
+            tabs.set(newName, newTab);
+            if (wasActive) activeName = newName;
+            if (wasInEditor && editor) editor.setModel(newTab.model);
+        }
+        // If the renamed file was listed in fade.json:sources, rewrite
+        // the manifest so the build keeps working. Preserves position.
+        await mutateManifest((p) => {
+            const idx = p.sources.indexOf(oldName);
+            if (idx < 0) return null;
+            const updated = [...p.sources];
+            updated[idx] = newName;
+            return { ...p, sources: updated };
+        });
+        await refreshFadeProject();
+        renderTabs();
+        await renderFileList(workspace);
+        return null;
+    }
+
+    // Folder (or any path) rename/move: relocate in OPFS, close tabs under
+    // the moved subtree, rewrite fade.json:sources that lived under it, and
+    // redraw. Returns an error message on failure or null on success; never
+    // throws. Shared by drag-drop moves and the inline folder-rename editor.
+    async function commitRenamePath(oldPath: string, newPath: string): Promise<string | null> {
+        if (oldPath === newPath) return null;
+        // Collect every tab whose path lives under the moved tree —
+        // we'll reopen them at their new paths after the rename so
+        // the user doesn't lose editor state. (For now we just
+        // close them — phase 5 wires the reopen path through the
+        // tab system's path-aware identity.)
+        const folderPrefix = oldPath + '/';
+        const affectedTabs: string[] = [];
+        for (const [tabName] of tabs) {
+            if (tabName === oldPath || tabName.startsWith(folderPrefix)) {
+                affectedTabs.push(tabName);
+            }
+        }
+        for (const tabName of affectedTabs) closeTab(tabName);
+        try {
+            await workspace.rename(oldPath, newPath);
+        } catch (e: any) {
+            return e?.message ?? String(e);
+        }
+        // Update fade.json: any source matching oldPath exactly, or
+        // sitting under oldPath/, gets rewritten to its new home.
+        await mutateManifest((p) => {
+            let touched = false;
+            const updated = p.sources.map((s) => {
+                if (s === oldPath) { touched = true; return newPath; }
+                if (s.startsWith(folderPrefix)) {
+                    touched = true;
+                    return newPath + '/' + s.slice(folderPrefix.length);
+                }
+                return s;
+            });
+            return touched ? { ...p, sources: updated } : null;
+        });
+        await refreshFadeProject();
+        renderTabs();
+        await renderFileList(workspace);
+        return null;
+    }
+
+    // VSCode-style inline rename: swap the file row's label for a text
+    // input pre-filled with the basename (name portion pre-selected, so
+    // typing replaces the name but keeps the extension). Enter commits,
+    // Escape cancels, blur commits. An invalid name keeps the editor open
+    // with the error as a tooltip rather than popping a browser dialog.
+    function startInlineRename(oldName: string, opts: { isFolder?: boolean } = {}) {
+        const li = fileListEl.querySelector<HTMLElement>(`li[data-name="${CSS.escape(oldName)}"]`);
+        const label = li?.querySelector<HTMLElement>('.file-label');
+        if (!li || !label) return;
+        if (li.querySelector('.file-rename-input')) return; // already editing
+
+        const lastSlash = oldName.lastIndexOf('/');
+        const dirPrefix = lastSlash >= 0 ? oldName.slice(0, lastSlash + 1) : '';
+        const oldBase = lastSlash >= 0 ? oldName.slice(lastSlash + 1) : oldName;
+
+        // Folder/file rows are drag sources — suspend dragging while editing
+        // so a text-selection gesture inside the input doesn't start a drag.
+        const wasDraggable = li.draggable;
+        li.draggable = false;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'file-rename-input';
+        input.value = oldBase;
+        input.spellcheck = false;
+        input.autocomplete = 'off';
+        label.style.display = 'none';
+        label.after(input);
+
+        let settled = false;
+        let inFlight = false;
+        const finish = () => {
+            settled = true;
+            input.remove();
+            label.style.display = '';
+            li.draggable = wasDraggable;
+        };
+        const commit = async () => {
+            if (settled || inFlight) return;
+            const raw = input.value.trim();
+            // Empty or unchanged → treat as cancel. A slashed value moves
+            // while renaming; a bare name stays in the current folder.
+            if (!raw || raw === oldBase) { finish(); return; }
+            const newName = raw.includes('/') ? raw : dirPrefix + raw;
+            inFlight = true;
+            const err = opts.isFolder
+                ? await commitRenamePath(oldName, newName)
+                : await commitRename(oldName, newName);
+            inFlight = false;
+            // Success re-renders the whole list (this input is detached by
+            // then) — finish() on the stale nodes is a harmless no-op.
+            if (err) {
+                input.classList.add('file-rename-invalid');
+                input.title = err;
+                input.focus();
+                input.select();
+                return;
+            }
+            finish();
+        };
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') { e.preventDefault(); void commit(); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(); }
+        });
+        input.addEventListener('blur', () => { void commit(); });
+        // Don't let clicks/drags inside the input bubble to the row (which
+        // would open the file, toggle the folder, or start a drag).
+        for (const evt of ['click', 'mousedown', 'dblclick', 'dragstart'] as const) {
+            input.addEventListener(evt, (e) => e.stopPropagation());
+        }
+
+        input.focus();
+        // Files: select just the name portion (before the final extension
+        // dot) so retyping keeps the extension. Folders have no extension,
+        // so select the whole name.
+        const dot = oldBase.lastIndexOf('.');
+        const selEnd = !opts.isFolder && dot > 0 ? dot : oldBase.length;
+        input.setSelectionRange(0, selEnd);
+    }
+
     projectOps = {
         addSourceAt: async (name, position) => {
             await mutateManifest((p) => {
@@ -3601,87 +3874,31 @@ async function bootstrap() {
             editor.focus();
         },
         renameFile: async (oldName) => {
-            if (oldName === FADE_JSON_NAME) {
-                alert('fade.json is the project manifest and cannot be renamed.');
-                return;
-            }
-            // Pre-fill the prompt with just the basename so a rename inside a
-            // folder doesn't accidentally move the file to root. If the user
-            // wants to move while renaming, they can still type a full
-            // slashed path — that takes precedence.
-            const lastSlash = oldName.lastIndexOf('/');
-            const dirPrefix = lastSlash >= 0 ? oldName.slice(0, lastSlash + 1) : '';
-            const oldBase = lastSlash >= 0 ? oldName.slice(lastSlash + 1) : oldName;
-            const input = prompt(`Rename "${oldName}" to:`, oldBase);
-            if (!input || input === oldBase) return;
-            const newName = input.includes('/') ? input : dirPrefix + input;
-            if (newName === oldName) return;
-            try {
-                await workspace.rename(oldName, newName);
-            } catch (e: any) {
-                alert('Rename failed: ' + (e?.message ?? e));
-                return;
-            }
-            // Monaco models are immutable on URI — swap by disposing the
-            // old model and creating a new one with the new URI. Any
-            // decorations + markers reattach via the polling loop's next
-            // LSP push.
-            const oldUri = monaco.Uri.file(`/workspace/${oldName}`);
-            const newUri = monaco.Uri.file(`/workspace/${newName}`);
-            const oldModel = monaco.editor.getModel(oldUri);
-            const text = oldModel ? oldModel.getValue() : await workspace.read(newName);
-            const wasActive = activeName === oldName;
-            const wasInEditor = editor?.getModel() === oldModel;
-            // Drop old model + virtualFs registration.
-            if (oldModel) oldModel.dispose();
-            unregisterVirtualFile(oldUri);
-            // Recreate at new URI.
-            const newModel = monaco.editor.createModel(text, languageFor(newName), newUri);
-            // Move tab entry if open.
-            const oldTab = tabs.get(oldName);
-            if (oldTab) {
-                tabs.delete(oldName);
-                const newTab: Tab = { name: newName, model: newModel, dirty: false };
-                newTab.model.onDidChangeContent(() => {
-                    newTab.dirty = true;
-                    sharingController?.setHasDirtyTabs(true);
-                    clearTimeout(newTab.saveTimer);
-                    newTab.saveTimer = window.setTimeout(async () => {
-                        try {
-                            await workspace.write(newTab.name, newTab.model.getValue());
-                            newTab.dirty = false;
-                            if (!anyTabDirty()) sharingController?.setHasDirtyTabs(false);
-                            sharingController?.invalidateHashFor(newTab.name);
-                            renderTabs();
-                        } catch (e) {
-                            console.error('[fade] save failed for', newTab.name, e);
-                        }
-                    }, 600);
-                    renderTabs();
-                });
-                tabs.set(newName, newTab);
-                if (wasActive) activeName = newName;
-                if (wasInEditor && editor) editor.setModel(newTab.model);
-            }
-            // If the renamed file was listed in fade.json:sources, rewrite
-            // the manifest so the build keeps working. Preserves position.
-            await mutateManifest((p) => {
-                const idx = p.sources.indexOf(oldName);
-                if (idx < 0) return null;
-                const updated = [...p.sources];
-                updated[idx] = newName;
-                return { ...p, sources: updated };
-            });
-            await refreshFadeProject();
-            renderTabs();
-            await renderFileList(workspace);
+            // fade.json's row has no rename affordance, but guard anyway.
+            if (oldName === FADE_JSON_NAME) return;
+            // Inline edit on the file row (no browser prompt). The heavy
+            // lifting lives in startInlineRename → commitRename above.
+            startInlineRename(oldName);
+        },
+        renameFolder: async (folderPath) => {
+            startInlineRename(folderPath, { isFolder: true });
         },
         deleteFile: async (name) => {
             if (name === FADE_JSON_NAME) {
                 alert('fade.json is the project manifest and cannot be deleted.');
                 return;
             }
-            if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+            const base = name.split('/').pop() ?? name;
+            const isDir = await workspace.isDirectory(name).catch(() => false);
+            const ok = await confirmDialog({
+                title: `Delete '${base}'?`,
+                body: isDir
+                    ? `This deletes the folder and all its contents. You can't undo this.`
+                    : `You can't undo this action.`,
+                confirmLabel: 'Delete',
+                danger: true,
+            });
+            if (!ok) return;
             // Close any open tab for this file first.
             if (tabs.has(name)) closeTab(name);
             // Dispose the Monaco model so it doesn't linger after the file
@@ -3734,39 +3951,11 @@ async function bootstrap() {
             void startInlineFolderCreate(parentFolder);
         },
         renamePath: async (oldPath, newPath) => {
-            if (oldPath === newPath) return;
-            // Collect every tab whose path lives under the moved tree —
-            // we'll reopen them at their new paths after the rename so
-            // the user doesn't lose editor state. (For now we just
-            // close them — phase 5 wires the reopen path through the
-            // tab system's path-aware identity.)
-            const folderPrefix = oldPath + '/';
-            const affectedTabs: string[] = [];
-            for (const [tabName] of tabs) {
-                if (tabName === oldPath || tabName.startsWith(folderPrefix)) {
-                    affectedTabs.push(tabName);
-                }
-            }
-            for (const tabName of affectedTabs) closeTab(tabName);
-            try { await workspace.rename(oldPath, newPath); }
-            catch (e: any) { alert('Rename failed: ' + (e?.message ?? e)); return; }
-            // Update fade.json: any source matching oldPath exactly, or
-            // sitting under oldPath/, gets rewritten to its new home.
-            await mutateManifest((p) => {
-                let touched = false;
-                const updated = p.sources.map((s) => {
-                    if (s === oldPath) { touched = true; return newPath; }
-                    if (s.startsWith(folderPrefix)) {
-                        touched = true;
-                        return newPath + '/' + s.slice(folderPrefix.length);
-                    }
-                    return s;
-                });
-                return touched ? { ...p, sources: updated } : null;
-            });
-            await refreshFadeProject();
-            renderTabs();
-            await renderFileList(workspace);
+            // Drag-drop + folder-move callers land here. Surface failures
+            // as an alert for these paths (the inline folder-rename editor
+            // calls commitRenamePath directly so it can show errors inline).
+            const err = await commitRenamePath(oldPath, newPath);
+            if (err) alert('Rename failed: ' + err);
         },
     };
 
