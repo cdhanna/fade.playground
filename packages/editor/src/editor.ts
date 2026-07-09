@@ -6,6 +6,7 @@ import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import type { FadeRunner } from '@fadebasic/runtime';
 import { attachFadeLanguage, applySemanticTokens, applyDiagnostics } from './language';
+import { activeFadeMonacoTheme } from './themes';
 
 // Monaco needs a worker factory. Fade's intelligence comes from the runtime
 // worker (not monaco's language workers), so the built-in editor worker is all
@@ -69,7 +70,7 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
     ensureDebugCss();
     const editor = monaco.editor.create(container, {
         model,
-        theme: opts.theme ?? 'fade-dark',
+        theme: opts.theme ?? activeFadeMonacoTheme(),
         readOnly: opts.readonly ?? false,
         automaticLayout: true,
         minimap: { enabled: false },

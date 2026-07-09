@@ -58,6 +58,11 @@ export class FadeRunner {
         Promise<{ resultType: string; value?: any }> | { resultType: string; value?: any }> = {};
     onPromptRequest?: (msg: string) => Promise<string | null> | string | null;
     onDebugEvent?: (event: DebugEvent) => void;
+    // Live program output (`print` / stdout / stderr). Settable by whichever
+    // component is currently running, so e.g. the MonoGame IDE can stream print
+    // lines into its console pane (the game canvas can't show them). The web VM
+    // renders print inside its own iframe, so this is mainly for MonoGame.
+    onOutput?: (line: string, isError: boolean) => void;
     // Per-test progress: fires once per finalized test during a
     // runTests call, mid-run. Result shape matches a single entry
     // in TestRunResult.results — the same applyResult logic can
@@ -160,7 +165,11 @@ export class FadeRunner {
     // misroute warning.
     private handleWorkerMessage(msg: any, reject: (err: Error) => void): void {
         if (msg.type === 'heartbeat') { this.opts.onHeartbeat?.(msg.role ?? 'lsp', msg.tick, msg.t); return; }
-        if (msg.type === 'print') { this.opts.onPrint(msg.line); return; }
+        if (msg.type === 'print') { (this.onOutput ? this.onOutput(msg.line, false) : this.opts.onPrint(msg.line)); return; }
+        // MonoGame forwards user `print` (and runtime messages) as stdout/stderr
+        // from the game iframe — route them to the live output hook.
+        if (msg.type === 'stdout') { (this.onOutput ?? ((l: string) => this.opts.onPrint(l)))(msg.line, false); return; }
+        if (msg.type === 'stderr') { this.onOutput?.(msg.line, true); return; }
         if (msg.type === 'alert') { this.opts.onAlert(msg.msg); return; }
         if (msg.type === 'result') {
             const r = this.pending.get(msg.id);
@@ -200,11 +209,15 @@ export class FadeRunner {
             || msg.type === 'debug-pause-result') {
             this.resolvePending(msg.id, true); return;
         }
-        if (msg.type === 'debug-stack-frames-result') { this.resolvePending(msg.id, msg.frames); return; }
+        // Payload key varies by VM target: the web worker + Export.Web iframe
+        // name the inspection payload per message (`frames` / `scopes`), but
+        // the MonoGame iframe's generic invokeAndReply wraps every reply as
+        // `{ result }`. Accept `result` as a fallback so both drive the runner.
+        if (msg.type === 'debug-stack-frames-result') { this.resolvePending(msg.id, msg.frames ?? msg.result); return; }
         if (msg.type === 'debug-resolve-instruction-result') { this.resolvePending(msg.id, msg.result); return; }
         if (msg.type === 'debug-scopes-result'
             || msg.type === 'debug-variable-expansion-result') {
-            this.resolvePending(msg.id, msg.scopes); return;
+            this.resolvePending(msg.id, msg.scopes ?? msg.result); return;
         }
         if (msg.type === 'debug-eval-result'
             || msg.type === 'debug-repl-result'
@@ -670,9 +683,9 @@ export class FadeRunner {
     }
     debugTerminate(): Promise<boolean> {
         this.interruptWait(2);
-        return this.simpleDebugCall('debug-terminate');
+        return this.fireDebugCall('debug-terminate');
     }
-    debugContinue(): Promise<boolean> { return this.simpleDebugCall('debug-continue'); }
+    debugContinue(): Promise<boolean> { return this.fireDebugCall('debug-continue'); }
     debugPause(): Promise<boolean> {
         // Wake any in-flight `wait ms` early AND tell C# this was a pause
         // request — WaitImpl will enqueue REQUEST_PAUSE synchronously so
@@ -680,28 +693,19 @@ export class FadeRunner {
         // the worker JS event loop to drain the debug-pause postMessage
         // (which can take up to a full DebugTick budget).
         this.interruptWait(1);
-        return this.simpleDebugCall('debug-pause');
+        return this.fireDebugCall('debug-pause');
     }
     debugStep(kind: 'over' | 'in' | 'out'): Promise<boolean> {
-        const id = ++this.nextId;
-        return new Promise<boolean>((resolve) => {
-            this.pending.set(id, () => resolve(true));
-            this.postVm({ type: 'debug-step', id, kind });
-        });
+        return this.fireDebugCall('debug-step', { kind });
     }
     debugSetBreakpoints(breakpoints: BreakpointRequest[]): Promise<boolean> {
-        const id = ++this.nextId;
         // Wake any in-flight `wait ms` so the worker's JS event loop yields
         // and picks up this breakpoint update without waiting out the rest
         // of the sleep. Without this, adding/removing a breakpoint mid-
         // `wait ms(3000)` only takes effect on the next loop iteration.
         this.interruptWait(3);
-        return new Promise<boolean>((resolve) => {
-            this.pending.set(id, () => resolve(true));
-            this.postVm({
-                type: 'debug-set-breakpoints', id,
-                linesJson: JSON.stringify(breakpoints),
-            });
+        return this.fireDebugCall('debug-set-breakpoints', {
+            linesJson: JSON.stringify(breakpoints),
         });
     }
     // Snapshot the in-flight debug-test session's pass/fail state. Returns
@@ -766,6 +770,23 @@ export class FadeRunner {
             this.pending.set(id, () => resolve(true));
             this.postVm({ type, id });
         });
+    }
+    // Fire-and-forget control-plane debug call (continue / pause / step /
+    // set-breakpoints / terminate). These are inherently one-way: the
+    // authoritative feedback is the async `debug-event` stream (paused,
+    // breakpoint hit, step landed), never the call's return value, and
+    // postMessage FIFO ordering guarantees e.g. set-breakpoints is applied
+    // before a following continue. We resolve as soon as the message is
+    // posted rather than awaiting a `*-result` reply, because not every VM
+    // target sends one: the web worker + Export.Web iframe ack these, but
+    // the MonoGame iframe invokes C# and returns without replying. Awaiting
+    // a reply that never comes would hang the whole debug sequence (e.g.
+    // `await pushBreakpoints()` blocking before `debugContinue()`). A late
+    // ack for `id` is a harmless no-op — resolvePending ignores unknown ids.
+    private fireDebugCall(type: string, extra?: object): Promise<boolean> {
+        const id = ++this.nextId;
+        this.postVm({ type, id, ...extra });
+        return Promise.resolve(true);
     }
     private debugTextCall(type: string, payload: object): Promise<DebugEvalResult | null> {
         const id = ++this.nextId;

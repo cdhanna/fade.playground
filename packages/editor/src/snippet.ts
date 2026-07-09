@@ -8,6 +8,7 @@
 // panel and the embeddable <fade-code> share one implementation.
 
 import type { SnippetToken } from '@fadebasic/runtime';
+import { injectFadeThemeCss } from './themes';
 
 // Semantic token type index → CSS class. Matches the LSP TokenTypeLegend order.
 export const TOKEN_TYPE_CLASS: Record<number, string> = {
@@ -17,15 +18,13 @@ export const TOKEN_TYPE_CLASS: Record<number, string> = {
     9: 'fade-tok-number', 10: 'fade-tok-string',
 };
 
-const COLORS: Record<string, string> = {
-    comment: '#6A9955', keyword: '#C586C0', function: '#DCDCAA', method: '#DCDCAA',
-    macro: '#C586C0', parameter: '#9CDCFE', struct: '#4EC9B0', type: '#4EC9B0',
-    operator: '#D4D4D4', number: '#B5CEA8', string: '#CE9178',
-};
-
 function escapeHtml(s: string): string {
     return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
+
+// Reserved words the LSP colors as a function/struct *name* — reclassified to
+// the keyword color (mirrors FORCE_KEYWORD in language.ts).
+const FORCE_KEYWORD_WORDS = new Set(['FUNCTION', 'ENDFUNCTION', 'EXITFUNCTION', 'TYPE', 'ENDTYPE']);
 
 export function renderTokenizedSnippet(source: string, tokens: SnippetToken[]): string {
     if (tokens.length === 0) return escapeHtml(source);
@@ -50,8 +49,15 @@ export function renderTokenizedSnippet(source: string, tokens: SnippetToken[]): 
     let cursor = 0;
     for (const s of cleaned) {
         if (s.start > cursor) out += escapeHtml(source.slice(cursor, s.start));
-        const cls = TOKEN_TYPE_CLASS[s.type] ?? 'fade-tok-default';
-        out += `<span class="${cls}">${escapeHtml(source.slice(s.start, s.end))}</span>`;
+        const text = source.slice(s.start, s.end);
+        let cls = TOKEN_TYPE_CLASS[s.type] ?? 'fade-tok-default';
+        // Match the editor: the LSP tags FUNCTION/… as `function` and TYPE/ENDTYPE
+        // as `struct` (name colors). Force those reserved words to the keyword
+        // color so every reserved word reads consistently. See language.ts.
+        if ((cls === 'fade-tok-function' || cls === 'fade-tok-struct') && FORCE_KEYWORD_WORDS.has(text.toUpperCase())) {
+            cls = 'fade-tok-keyword';
+        }
+        out += `<span class="${cls}">${escapeHtml(text)}</span>`;
         cursor = s.end;
     }
     if (cursor < source.length) out += escapeHtml(source.slice(cursor));
@@ -95,15 +101,9 @@ export function highlightFadeStatic(source: string, commands?: ReadonlySet<strin
     return out;
 }
 
-let cssInjected = false;
-/** Inject `.fade-tok-*` colors once. */
+/** Inject the per-theme token colors once. */
 export function injectSnippetCss(): void {
-    if (cssInjected || typeof document === 'undefined') return;
-    cssInjected = true;
-    const rules = Object.entries(COLORS).map(([t, c]) => `.fade-tok-${t}{color:${c};}`).join('\n')
-        + '\n.fade-tok-comment{font-style:italic;}';
-    const style = document.createElement('style');
-    style.setAttribute('data-fade-snippet', '');
-    style.textContent = rules;
-    document.head.appendChild(style);
+    // Token colors are theme-driven and centralized in themes.ts, covering both
+    // the static `.fade-tok-*` spans and the editor's `.fade-token-*` tokens.
+    injectFadeThemeCss();
 }

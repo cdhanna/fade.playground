@@ -5,7 +5,7 @@
 // commands like `print`) via the shared worker.
 
 import { highlightFadeStatic, renderTokenizedSnippet, injectSnippetCss } from '@fadebasic/editor';
-import { getSharedRunner, getLspReady } from './runner-pool';
+import { getSharedRunner, getLspReady, getMonoLspReady } from './runner-pool';
 
 export class FadeCodeElement extends HTMLElement {
     private _code?: string;
@@ -52,9 +52,13 @@ export class FadeCodeElement extends HTMLElement {
         // front serializes 100+ calls through the one shared worker and feels
         // slow. Only upgrade blocks as they scroll into view. The static
         // coloring already covers everything off-screen.
+        // `runtime="monogame"`: make the LSP command-aware of the game command
+        // set so game commands tokenize as commands (purple), not identifiers.
+        const monoRuntime = this.getAttribute('runtime') === 'monogame';
         const upgrade = () => {
-            const runner = getSharedRunner(assetBase);
-            void getLspReady(runner, assetBase)
+            const runner = getSharedRunner(assetBase, monoRuntime ? 'monogame' : 'web');
+            const ready = monoRuntime ? getMonoLspReady(runner, assetBase) : getLspReady(runner, assetBase);
+            void ready
                 .then(() => runner.tokenizeSnippet(source))
                 .then((tokens) => { if (tokens.length && this.isConnected) codeEl.innerHTML = renderTokenizedSnippet(source, tokens); })
                 .catch(() => { /* keep the static coloring */ });
@@ -84,7 +88,7 @@ function injectStyles(): void {
     const style = document.createElement('style');
     style.setAttribute('data-fade-code', '');
     style.textContent = `
-.fade-code__pre { margin: 0; background: #1e1e1e; color: #d4d4d4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333; overflow-x: auto; }
+.fade-code__pre { margin: 0; background: var(--code-bg); color: var(--fg); padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border-2); overflow-x: auto; }
 fade-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; white-space: pre; font-feature-settings: "calt" 0, "liga" 0; }
 `;
     document.head.appendChild(style);

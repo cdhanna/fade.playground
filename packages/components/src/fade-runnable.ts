@@ -13,7 +13,9 @@ import '@vscode/codicons/dist/codicon.css';
 import { FadeRunner, type TestEntry } from '@fadebasic/runtime';
 import { createFadeEditor, setDebugHoverEvaluator, showCrashOverlay, hideCrashOverlay, summarizeCrash, extractInsIndex, type FadeEditor } from '@fadebasic/editor';
 import { armWebPreview } from './web-preview';
-import { getSharedRunner, getLspReady } from './runner-pool';
+import { armMonoGamePreview } from './monogame-preview';
+import { getSharedRunner, getLspReady, getMonoLspReady } from './runner-pool';
+import { FADE_THEME_PRESETS, applyFadeTheme, getFadeTheme } from './theme';
 
 interface StackFrame { name: string; lineNumber: number; colNumber: number }
 interface DbgVar { id: number; name: string; type?: string; value: string; fieldCount?: number; elementCount?: number }
@@ -27,6 +29,7 @@ export class FadeRunnableElement extends HTMLElement {
     private armed = false;
     private armingPromise?: Promise<void>;
     private running = false;
+    private mono = false;                 // runtime="monogame": run/debug on the KNI canvas
     private _code?: string;
     private ide = false;
 
@@ -57,6 +60,7 @@ export class FadeRunnableElement extends HTMLElement {
     private bpBody?: HTMLElement;
     private replLog?: HTMLElement;
     private replInput?: HTMLInputElement;
+    private floatCanvas?: HTMLElement;    // MonoGame: fixed bottom-right game window
 
     get code(): string { return this.fadeEditor?.getValue() ?? this._code ?? ''; }
     set code(v: string) { this._code = v; if (this.fadeEditor) this.fadeEditor.setValue(v); }
@@ -68,8 +72,15 @@ export class FadeRunnableElement extends HTMLElement {
         const assetBase = this.getAttribute('asset-base') ?? '/runtime/';
         const readonly = this.hasAttribute('readonly');
         const noRun = this.hasAttribute('no-run');
+        // `runtime="monogame"`: run/debug on the KNI/Blazor game canvas. It
+        // speaks the same VM protocol as the web runtime, so the full IDE
+        // (breakpoints, stepping, variables) works — the only difference is the
+        // output is a canvas (placed right of the editor). The web LSP doesn't
+        // know game commands, so diagnostics are disabled (see below).
+        this.mono = this.getAttribute('runtime') === 'monogame';
         this.debugEnabled = this.hasAttribute('debug') && !noRun && !readonly;
         this.ide = this.debugEnabled && this.getAttribute('layout') === 'ide';
+        if (this.mono) this.classList.add('fade-runnable--mono');
         this.watches = (this.getAttribute('watch') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
         // `hint`: surface contextual guidance as a leading comment line inside
@@ -92,11 +103,17 @@ export class FadeRunnableElement extends HTMLElement {
         const toolbar = el('div', 'fade-runnable__toolbar');
         this.statusEl = el('div', 'fade-runnable__status');
 
-        this.runner = getSharedRunner(assetBase);
+        this.runner = getSharedRunner(assetBase, this.mono ? 'monogame' : 'web');
         this.fadeEditor = createFadeEditor(editorHost, {
             runner: this.runner, value, readonly,
+            // Live diagnostics (red squiggles). MonoGame gets its own LSP worker
+            // (Standard + FadeMonoGame commands, no Web — see getMonoLspReady), so
+            // game commands validate accurately without the false 'ambiguous'
+            // errors a mixed command set would produce.
             diagnostics: !readonly, glyphMargin: this.debugEnabled,
-            lspReady: getLspReady(this.runner, assetBase),
+            // MonoGame components additionally register the game command set so
+            // commands tokenize as commands (purple), not identifiers (blue).
+            lspReady: this.mono ? getMonoLspReady(this.runner, assetBase) : getLspReady(this.runner, assetBase),
             onDiagnostics: (errors) => this.onDiagnostics(errors),
         });
 
@@ -140,6 +157,8 @@ export class FadeRunnableElement extends HTMLElement {
         this.fadeEditor?.dispose();
         this.fadeEditor = undefined;
         if (this.debugging) setDebugHoverEvaluator(null);
+        this.floatCanvas?.remove();   // it lives on <body>, so clean it up here
+        this.floatCanvas = undefined;
     }
 
     // ── Layouts ──────────────────────────────────────────────────────────────
@@ -160,7 +179,69 @@ export class FadeRunnableElement extends HTMLElement {
             const closeBtn = iconBtn('fade-runnable__btn', 'close', 'close', 'Close', () => this.dispatchEvent(new CustomEvent('fadeclose', { bubbles: true })));
             toolbar.insertBefore(closeBtn, toolbar.firstChild);
         }
-        this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole());
+        // MonoGame reads exactly like the web IDE (toolbar | sidebar | editor |
+        // console) — but its iframe IS the game canvas, so it doesn't belong in
+        // the bottom output pane. Pull it into a floating window fixed to the
+        // viewport's bottom-right instead, and give the console its text role.
+        if (this.mono) {
+            this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole(false));
+            this.buildFloatingCanvas();
+        } else {
+            this.append(toolbar, this.buildSidebar(), editorHost, this.buildConsole());
+        }
+    }
+
+    // MonoGame: a draggable, resizable game window pinned to the viewport's
+    // bottom-right. Lives on <body> (not inside the grid) so it floats over the
+    // page; created hidden and revealed on the first Run/Debug (see ensureArmed).
+    private buildFloatingCanvas(): void {
+        const box = el('div', 'fade-runnable__float');
+        const head = el('div', 'fade-runnable__float-head');
+        const title = el('span', 'fade-runnable__float-title'); title.textContent = 'Game';
+        const close = iconBtn('fade-runnable__float-close', 'close', '', 'Close game window', () => this.hideFloatingCanvas());
+        close.addEventListener('pointerdown', (e) => e.stopPropagation());   // don't start a drag
+        head.append(title, spacer(), close);
+        // The game is a 16:9 "screen" centered on a checkerboard stage, so the
+        // checker shows around it and the screen bounds are obvious.
+        const stage = el('div', 'fade-runnable__float-stage');
+        stage.append(this.iframe!);
+        box.append(head, stage);
+        box.style.display = 'none';
+        this.makeDraggable(box, head);
+        this.floatCanvas = box;
+        document.body.appendChild(box);
+    }
+
+    private showFloatingCanvas(): void {
+        if (this.floatCanvas) this.floatCanvas.style.display = '';
+    }
+
+    // Dismiss the floating game window. Ends any live debug session first (a
+    // hidden-but-paused debugger is confusing), then hides the window — the next
+    // Run/Debug re-reveals it via ensureArmed.
+    private hideFloatingCanvas(): void {
+        if (this.debugging) this.stopDebug();
+        if (this.floatCanvas) this.floatCanvas.style.display = 'none';
+    }
+
+    // Drag the floating window by its header. Switches from the default
+    // right/bottom anchoring to explicit left/top on first grab so the box
+    // tracks the pointer regardless of which corner it started pinned to.
+    private makeDraggable(box: HTMLElement, handle: HTMLElement): void {
+        handle.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            const rect = box.getBoundingClientRect();
+            const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+            box.style.right = 'auto'; box.style.bottom = 'auto';
+            box.style.left = `${rect.left}px`; box.style.top = `${rect.top}px`;
+            const move = (ev: PointerEvent) => {
+                box.style.left = `${Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - dx))}px`;
+                box.style.top = `${Math.max(0, Math.min(window.innerHeight - 20, ev.clientY - dy))}px`;
+            };
+            const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up);
+        });
     }
 
     // ── Toolbar assembly: status (left) … step strip, Debug, Run (right) ─────
@@ -168,9 +249,27 @@ export class FadeRunnableElement extends HTMLElement {
     // the Playground's header where Run/Debug sit on the right.
     private assembleToolbar(toolbar: HTMLElement): void {
         toolbar.append(spacer());
+        // `theme-picker`: render a theme <select> in the toolbar, left of the
+        // action buttons (the homepage uses this so the picker lives in the editor).
+        if (this.hasAttribute('theme-picker')) toolbar.append(this.buildThemePicker());
         if (this.debugBar) toolbar.append(this.debugBar);
         if (this.debugBtn) toolbar.append(this.debugBtn);
         if (!this.hideRun) toolbar.append(this.runBtn!);
+    }
+
+    private buildThemePicker(): HTMLElement {
+        const sel = document.createElement('select');
+        sel.className = 'fade-runnable__theme';
+        sel.title = 'Theme';
+        sel.setAttribute('aria-label', 'Theme');
+        for (const t of FADE_THEME_PRESETS) {
+            const o = document.createElement('option');
+            o.value = t.id; o.textContent = t.label;
+            sel.append(o);
+        }
+        sel.value = getFadeTheme();
+        sel.addEventListener('change', () => applyFadeTheme(sel.value));
+        return sel;
     }
 
     private setupDebugControls(): void {
@@ -204,18 +303,23 @@ export class FadeRunnableElement extends HTMLElement {
     }
 
     // ── Combined Output + Debug Console (single panel) ───────────────────────
-    private buildConsole(): HTMLElement {
+    // `includeVm` places the VM iframe here (web runtime — text output). MonoGame
+    // puts the iframe (game canvas) in its own right-hand pane instead, so this
+    // console holds just the stdout log + REPL.
+    private buildConsole(includeVm = true): HTMLElement {
         const wrap = el('div', 'fade-runnable__console');
-        wrap.append(paneHeader('Output'));
-        wrap.append(this.iframe!);
+        wrap.append(paneHeader(includeVm ? 'Output' : 'Console'));
+        if (includeVm) wrap.append(this.iframe!);
         this.replLog = el('div', 'fade-runnable__repl-log');
         const row = el('div', 'fade-runnable__repl-row');
         const prompt = el('span', 'fade-runnable__repl-prompt'); prompt.textContent = '›';
         this.replInput = document.createElement('input');
         this.replInput.className = 'fade-runnable__repl-input';
         this.replInput.type = 'text';
-        this.replInput.placeholder = 'Evaluate / assign (while paused)…';
-        this.replInput.disabled = true;
+        this.replInput.placeholder = 'Evaluate an expression (Debug + pause first)…';
+        // Always focusable — evaluating still needs a paused debug session, but
+        // a clickable box (with a hint on Enter) reads far better than a dead,
+        // greyed-out input on the page.
         this.replInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); const v = this.replInput!.value; this.replInput!.value = ''; void this.evalRepl(v); }
         });
@@ -279,6 +383,10 @@ export class FadeRunnableElement extends HTMLElement {
                 this.setStatus(msg, true);      // …so set the message after
                 return;
             }
+            // Session is live and about to run: enable the running-state
+            // controls (steps disabled, but Stop clickable) so the user can stop
+            // a program that never hits a breakpoint.
+            this.setStepEnabled(false);
             await this.pushBreakpoints();
             await this.runner.debugContinue();
         } catch (e) {
@@ -405,7 +513,7 @@ export class FadeRunnableElement extends HTMLElement {
     private setResumed(status: string): void {
         this.paused = false;
         this.setStepEnabled(false);
-        if (this.replInput) this.replInput.disabled = true;
+        /* repl input stays clickable; eval is gated in evalRepl */
         this.fadeEditor?.setCurrentLine(null);
         this.setStatus(status);
     }
@@ -655,8 +763,12 @@ export class FadeRunnableElement extends HTMLElement {
     // ── REPL (executes statements — can set variables) ───────────────────────
     private async evalRepl(raw: string): Promise<void> {
         const expr = raw.trim();
-        if (!expr || !this.paused) return;
+        if (!expr) return;
         this.appendRepl(`› ${expr}`, 'in');
+        if (!this.paused) {
+            this.appendRepl('Start Debug (⌘D) and pause at a breakpoint to evaluate expressions.', 'err');
+            return;
+        }
         try {
             const r = await this.runner!.debugRepl(this.activeFrame, expr);
             this.appendRepl(r ? String(r.value) : '(no result)', r && r.id === -1 ? 'err' : 'out');
@@ -691,8 +803,9 @@ export class FadeRunnableElement extends HTMLElement {
         this.expandedVars.clear();
         this.frames = [];
         this.fadeEditor?.setCurrentLine(null);
+        this.hideFloatingCanvas();   // tear down the game window when debugging ends
         for (const b of this.stepBtns) b.disabled = true;
-        if (this.replInput) this.replInput.disabled = true;
+        /* repl input stays clickable; eval is gated in evalRepl */
         if (this.varsBody) this.varsBody.innerHTML = emptyMsg('Not paused');
         if (this.framesBody) this.framesBody.innerHTML = emptyMsg('Not paused');
         void this.refreshWatch();
@@ -707,7 +820,11 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.runBtn) this.runBtn.disabled = true;
         this.setStatus('');
         try {
-            if (!this.armed) { this.setStatus('Loading runtime…'); await this.ensureArmed(); this.setStatus(''); }
+            // Always ensureArmed — besides the one-time boot, it re-reveals the
+            // MonoGame window if the user closed it, so Run restarts cleanly.
+            if (!this.armed) this.setStatus('Loading runtime…');
+            await this.ensureArmed();
+            this.setStatus('');
             const result = JSON.parse(await this.runner.run(this.fadeEditor!.getValue()));
             if (result.compileError) this.setStatus(result.compileError, true);
             else if (result.ok === false && result.error) this.setStatus(result.error, true);
@@ -746,8 +863,18 @@ export class FadeRunnableElement extends HTMLElement {
     // callers (e.g. rapid edits re-listing tests while Debug also arms) don't
     // double-arm.
     private ensureArmed(): Promise<void> {
+        // Reveal the floating game window as soon as a Run/Debug starts so the
+        // user sees the boot splash / loading state, not just the final frame.
+        // MonoGame's canvas can't show `print`, so stream program output into
+        // this component's console pane instead (the runner is shared + single-
+        // active, so the running component owns the hook).
+        if (this.mono) {
+            this.showFloatingCanvas();
+            this.runner!.onOutput = (line, isErr) => this.appendRepl(line, isErr ? 'err' : 'out');
+        }
         if (this.armed || !this.iframe) return Promise.resolve();
-        this.armingPromise ??= armWebPreview(this.runner!, this.iframe, this.assetBase()).then(() => { this.armed = true; });
+        const arm = this.mono ? armMonoGamePreview : armWebPreview;
+        this.armingPromise ??= arm(this.runner!, this.iframe, this.assetBase()).then(() => { this.armed = true; });
         return this.armingPromise;
     }
 
@@ -819,17 +946,19 @@ function injectStyles(): void {
     let style = document.head.querySelector<HTMLStyleElement>('style[data-fade-runnable]');
     if (!style) { style = document.createElement('style'); style.setAttribute('data-fade-runnable', ''); document.head.appendChild(style); }
     style.textContent = `
-.fade-runnable { display: block; border: 1px solid #333; border-radius: 6px; overflow: hidden; background: #1e1e1e; color: #d4d4d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.fade-runnable { display: block; border: 1px solid var(--border-2); border-radius: 6px; overflow: hidden; background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fade-runnable__editor { height: 220px; }
-.fade-runnable__toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; background: #252526; border-top: 1px solid #333; }
+.fade-runnable__toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; background: var(--bg-2); border-top: 1px solid var(--border-2); }
+.fade-runnable__theme { flex: 0 0 auto; background: var(--bg-3); color: var(--fg); border: 1px solid var(--border-2); border-radius: 6px; font: inherit; font-size: 12px; padding: 3px 6px; cursor: pointer; }
+.fade-runnable__theme:focus { outline: none; border-color: var(--accent); }
 .fade-runnable__spacer { flex: 1 1 auto; min-width: 0; }
 /* width/flex are pinned so host \`button {}\` styles (e.g. width:100%) can't
    stretch these — the toolbar buttons are always content-width. */
-.fade-runnable__btn { flex: 0 0 auto; width: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #3a3d41; color: #fff; border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; white-space: nowrap; }
-.fade-runnable__btn:hover:not(:disabled) { background: #4a4d51; }
-.fade-runnable__btn:disabled { opacity: 0.5; cursor: not-allowed; background: #3a3d41; color: #9aa0a6; }
-.fade-runnable__btn--primary { background: #0e639c; }
-.fade-runnable__btn--primary:hover:not(:disabled) { background: #1177bb; }
+.fade-runnable__btn { flex: 0 0 auto; width: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: var(--btn-hover-bg); color: var(--fg); border: 0; border-radius: 4px; padding: 4px 12px; font: inherit; font-size: 13px; white-space: nowrap; }
+.fade-runnable__btn:hover:not(:disabled) { background: var(--bg-3); }
+.fade-runnable__btn:disabled { opacity: 0.5; cursor: not-allowed; background: var(--btn-hover-bg); color: var(--fg-muted); }
+.fade-runnable__btn--primary { background: var(--accent); }
+.fade-runnable__btn--primary:hover:not(:disabled) { background: var(--accent-hover); }
 .fade-runnable__btn .codicon { font-size: 15px; }
 /* Run-Tests split button: a main action fused to a caret. */
 .fade-runnable__split { position: relative; display: inline-flex; flex: 0 0 auto; }
@@ -838,87 +967,89 @@ function injectStyles(): void {
 .fade-runnable__split-caret .codicon { font-size: 13px; }
 .fade-runnable__menu {
     position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 180px;
-    background: #252526; border: 1px solid #454545; border-radius: 6px; padding: 4px;
+    background: var(--bg-2); border: 1px solid #454545; border-radius: 6px; padding: 4px;
     box-shadow: 0 6px 20px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 1px;
 }
 .fade-runnable__menu-item {
     width: 100%; display: flex; align-items: center; gap: 6px; text-align: left; background: transparent;
-    color: #d4d4d4; border: 0; border-radius: 4px; padding: 5px 10px; font: inherit; font-size: 12px;
+    color: var(--fg); border: 0; border-radius: 4px; padding: 5px 10px; font: inherit; font-size: 12px;
     cursor: pointer; white-space: nowrap;
 }
 .fade-runnable__menu-item .codicon { font-size: 13px; flex: 0 0 auto; }
-.fade-runnable__menu-item.is-selected { color: #fff; }
-.fade-runnable__menu-item:hover { background: #04395e; color: #fff; }
+.fade-runnable__menu-item.is-selected { color: var(--fg); }
+.fade-runnable__menu-item:hover { background: var(--list-active-bg); color: var(--fg); }
 /* flex: 0 1 auto so status yields to the step strip (never pushes it off the
    right edge); min-width:0 lets it ellipsize. */
-.fade-runnable__status { flex: 0 1 auto; min-width: 0; padding: 0 8px; color: #bbb; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fade-runnable__status { flex: 0 1 auto; min-width: 0; padding: 0 8px; color: var(--fg-muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fade-runnable__status--error { color: #f14c4c; }
-.fade-runnable__vm { display: block; width: 100%; height: 150px; border: 0; background: #1e1e1e; }
+.fade-runnable__vm { display: block; width: 100%; height: 150px; border: 0; background: var(--bg); }
+/* MonoGame mode: the iframe IS the game canvas and floats in a fixed window
+   (.fade-runnable__float) rather than sitting in the output pane. */
 /* The step strip only appears while a debug session is active. flex:none keeps
    it fully visible regardless of the toolbar width. */
-.fade-runnable__debugbar { display: none; flex: none; gap: 1px; align-items: center; background: #2d2d2d; border: 1px solid #3a3a3a; border-radius: 6px; padding: 2px; }
+.fade-runnable__debugbar { display: none; flex: none; gap: 1px; align-items: center; background: var(--bg-3); border: 1px solid var(--border-2); border-radius: 6px; padding: 2px; }
 .fade-runnable--debugging .fade-runnable__debugbar { display: inline-flex; }
 /* While a session is live the step strip drives things — hide the Debug button. */
 .fade-runnable--debugging .fade-runnable__btn--debug { display: none; }
-.fade-runnable__tb { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: #cccccc; border: 0; border-radius: 4px; width: 28px; height: 24px; }
-.fade-runnable__tb:hover:not(:disabled) { background: #3a3d41; }
+.fade-runnable__tb { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: transparent; color: var(--fg-2); border: 0; border-radius: 4px; width: 28px; height: 24px; }
+.fade-runnable__tb:hover:not(:disabled) { background: var(--btn-hover-bg); }
 .fade-runnable__tb:disabled { opacity: 0.35; cursor: default; }
 .fade-runnable__tb .codicon { font-size: 16px; }
 .fade-runnable__tb .codicon-debug-continue { color: #89d185; }
 /* Debug pane / sidebar */
-.fade-runnable__sidebar { background: #1e1e1e; font-size: 12px; border-top: 1px solid #333; }
-.fade-runnable__pane-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #bbb; padding: 5px 8px; background: #252526; border-bottom: 1px solid #2b2b2b; }
-.fade-runnable__section { border-bottom: 1px solid #2b2b2b; }
-.fade-runnable__section-head { display: flex; align-items: center; gap: 4px; padding: 4px 8px; cursor: pointer; user-select: none; background: #252526; }
-.fade-runnable__section-head:hover { background: #2a2d2e; }
-.fade-runnable__twisty { color: #888; font-size: 14px; }
-.fade-runnable__section-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #ccc; }
-.fade-runnable__section-action { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: #bbb; border: 0; display: inline-flex; }
-.fade-runnable__section-action:hover { color: #fff; }
+.fade-runnable__sidebar { background: var(--bg); font-size: 12px; border-top: 1px solid var(--border-2); }
+.fade-runnable__pane-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: var(--fg-muted); padding: 5px 8px; background: var(--bg-2); border-bottom: 1px solid var(--border-2); }
+.fade-runnable__section { border-bottom: 1px solid var(--border-2); }
+.fade-runnable__section-head { display: flex; align-items: center; gap: 4px; padding: 4px 8px; cursor: pointer; user-select: none; background: var(--bg-2); }
+.fade-runnable__section-head:hover { background: var(--hover-bg); }
+.fade-runnable__twisty { color: var(--fg-muted); font-size: 14px; }
+.fade-runnable__section-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: var(--fg-2); }
+.fade-runnable__section-action { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: var(--fg-muted); border: 0; display: inline-flex; }
+.fade-runnable__section-action:hover { color: var(--fg); }
 /* No horizontal padding here — rows are full-bleed and carry their own 8px
    inset, so each line (and its hover) spans the full column width. */
 .fade-runnable__section-body { padding: 4px 0 6px; max-height: 200px; overflow: auto; }
 .fade-runnable__section-body--collapsed { display: none; }
-.fade-runnable__empty { color: #777; font-style: italic; padding: 2px 8px; }
-.fade-runnable__scope { color: #888; text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; padding: 0 8px; }
+.fade-runnable__empty { color: var(--fg-muted); font-style: italic; padding: 2px 8px; }
+.fade-runnable__scope { color: var(--fg-muted); text-transform: uppercase; font-size: 10px; margin: 4px 0 2px; padding: 0 8px; }
 .fade-runnable__var-wrap { }
 .fade-runnable__var { display: flex; gap: 6px; padding: 1px 8px; align-items: center; }
-.fade-runnable__var:hover { background: #2a2d2e; }
-.fade-runnable__var-twisty { flex: 0 0 auto; width: 14px; display: inline-flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; }
+.fade-runnable__var:hover { background: var(--hover-bg); }
+.fade-runnable__var-twisty { flex: 0 0 auto; width: 14px; display: inline-flex; align-items: center; justify-content: center; color: var(--fg-muted); cursor: pointer; font-size: 14px; }
 .fade-runnable__var-twisty--empty { cursor: default; }
 .fade-runnable__var-children { }
-.fade-runnable__varname { color: #9CDCFE; }
-.fade-runnable__vartype { color: #569CD6; opacity: 0.6; }
-.fade-runnable__varval { color: #B5CEA8; margin-left: auto; cursor: text; border-radius: 3px; padding: 0 2px; }
-.fade-runnable__varval:hover { background: #2a2d2e; }
-.fade-runnable__var-edit { width: 90px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #007acc; border-radius: 3px; padding: 0 3px; font: inherit; font-size: 12px; }
+.fade-runnable__varname { color: var(--link-fg); }
+.fade-runnable__vartype { color: var(--fg-muted); opacity: 0.6; }
+.fade-runnable__varval { color: var(--code-fg); margin-left: auto; cursor: text; border-radius: 3px; padding: 0 2px; }
+.fade-runnable__varval:hover { background: var(--hover-bg); }
+.fade-runnable__var-edit { width: 90px; background: var(--bg); color: var(--fg); border: 1px solid #007acc; border-radius: 3px; padding: 0 3px; font: inherit; font-size: 12px; }
 .fade-runnable__watch-item { display: flex; gap: 8px; padding: 1px 8px; align-items: center; }
-.fade-runnable__watch-item:hover { background: #2a2d2e; }
-.fade-runnable__watch-expr { color: #9CDCFE; }
-.fade-runnable__watch-val { color: #B5CEA8; margin-left: auto; }
+.fade-runnable__watch-item:hover { background: var(--hover-bg); }
+.fade-runnable__watch-expr { color: var(--link-fg); }
+.fade-runnable__watch-val { color: var(--code-fg); margin-left: auto; }
 .fade-runnable__watch-val--err { color: #f14c4c; font-style: italic; }
-.fade-runnable__watch-add { width: 100%; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 2px 6px; font: inherit; font-size: 12px; margin-bottom: 4px; }
+.fade-runnable__watch-add { width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--border-2); border-radius: 4px; padding: 2px 6px; font: inherit; font-size: 12px; margin-bottom: 4px; }
 .fade-runnable__frame { display: flex; gap: 6px; padding: 2px 8px; cursor: pointer; }
-.fade-runnable__frame:hover { background: #2a2d2e; }
-.fade-runnable__frame--active { background: #37373d; }
-.fade-runnable__frame-name { color: #dcdcaa; }
-.fade-runnable__frame-line { color: #888; margin-left: auto; }
+.fade-runnable__frame:hover { background: var(--hover-bg); }
+.fade-runnable__frame--active { background: var(--list-active-bg); }
+.fade-runnable__frame-name { color: var(--accent); }
+.fade-runnable__frame-line { color: var(--fg-muted); margin-left: auto; }
 .fade-runnable__bp { display: flex; align-items: center; gap: 6px; padding: 2px 8px; }
-.fade-runnable__bp:hover { background: #2a2d2e; }
+.fade-runnable__bp:hover { background: var(--hover-bg); }
 .fade-runnable__bp-dot { width: 9px; height: 9px; border-radius: 50%; background: #e51400; flex: none; }
-.fade-runnable__bp-line { color: #d4d4d4; }
-.fade-runnable__row-remove { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: #888; border: 0; display: inline-flex; }
+.fade-runnable__bp-line { color: var(--fg); }
+.fade-runnable__row-remove { flex: 0 0 auto; width: auto; margin-left: auto; cursor: pointer; background: transparent; color: var(--fg-muted); border: 0; display: inline-flex; }
 .fade-runnable__row-remove:hover { color: #f14c4c; }
 /* Combined Output + Debug Console */
-.fade-runnable__console { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid #333; }
+.fade-runnable__console { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border-2); }
 .fade-runnable__repl-log { overflow: auto; white-space: pre-wrap; padding: 2px 8px; max-height: 90px; }
 .fade-runnable__repl-log:empty { display: none; }
-.fade-runnable__repl-line--in { color: #9CDCFE; }
-.fade-runnable__repl-line--out { color: #d4d4d4; }
+.fade-runnable__repl-line--in { color: var(--link-fg); }
+.fade-runnable__repl-line--out { color: var(--fg); }
 .fade-runnable__repl-line--err { color: #f14c4c; }
-.fade-runnable__repl-row { display: flex; align-items: center; gap: 6px; border-top: 1px solid #2b2b2b; padding: 4px 8px; }
-.fade-runnable__repl-prompt { color: #6a9955; }
-.fade-runnable__repl-input { flex: 1; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.fade-runnable__repl-row { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border-2); padding: 4px 8px; }
+.fade-runnable__repl-prompt { color: var(--fg-muted); }
+.fade-runnable__repl-input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border-2); border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
 .fade-runnable__repl-input:disabled { opacity: 0.5; }
 /* IDE layout — mini VSCode */
 /* minmax(0, 1fr) — NOT plain 1fr — so the editor track can shrink below its
@@ -926,14 +1057,51 @@ function injectStyles(): void {
    bare 1fr the grid (and the toolbar spanning it) is forced wider than the
    viewport, pushing the right-aligned Run/Debug buttons off-screen. */
 .fade-runnable--ide { display: grid; height: min(80vh, 900px); min-height: 480px; grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: auto 1fr minmax(140px, 26%); grid-template-areas: "toolbar toolbar" "sidebar editor" "bottom bottom"; }
-.fade-runnable--ide .fade-runnable__toolbar { grid-area: toolbar; border-top: 0; border-bottom: 1px solid #333; }
-.fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid #333; border-top: 0; }
+.fade-runnable--ide .fade-runnable__toolbar { grid-area: toolbar; border-top: 0; border-bottom: 1px solid var(--border-2); }
+.fade-runnable--ide .fade-runnable__sidebar { grid-area: sidebar; overflow: auto; border-right: 1px solid var(--border-2); border-top: 0; }
 .fade-runnable--ide .fade-runnable__pane-editor { grid-area: editor; height: 100%; }
 .fade-runnable--ide .fade-runnable__console { grid-area: bottom; min-height: 0; }
 /* min-height:0 so the iframe (intrinsic 150px, min-height:auto by default)
    can shrink and leave room for the REPL row below it in the console. */
 .fade-runnable--ide .fade-runnable__vm { flex: 1; height: auto; min-height: 0; }
 .fade-runnable--ide .fade-runnable__status { padding: 0 10px 0 4px; }
+/* MonoGame floating game window — pinned to the viewport bottom-right, drag by
+   the header, resizable. The editor/sidebar/console read exactly like the web
+   IDE; only the game output floats free. */
+.fade-runnable__float {
+    position: fixed; right: 20px; bottom: 20px; z-index: 9999;
+    width: 560px; height: 360px; min-width: 280px; min-height: 200px;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg); border: 1px solid #454545; border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+    resize: both;
+}
+.fade-runnable__float-head {
+    display: flex; align-items: center; flex: none;
+    padding: 5px 10px; background: var(--bg-2); border-bottom: 1px solid var(--border-2);
+    cursor: move; user-select: none; touch-action: none;
+}
+.fade-runnable__float-title { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: var(--fg-muted); }
+.fade-runnable__float-close { flex: 0 0 auto; cursor: pointer; background: transparent; color: var(--fg-muted); border: 0; border-radius: 4px; width: 22px; height: 20px; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.fade-runnable__float-close:hover { background: var(--btn-hover-bg); color: var(--fg); }
+.fade-runnable__float-close .codicon { font-size: 14px; }
+/* Stage: a dark-grey checkerboard so the letterbox around the 16:9 game screen
+   is visible and the screen bounds are obvious. */
+.fade-runnable__float-stage {
+    flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+    padding: 8px; overflow: hidden;
+    background-color: #2a2a2a;
+    background-image:
+        linear-gradient(45deg, #202020 25%, transparent 25%, transparent 75%, #202020 75%),
+        linear-gradient(45deg, #202020 25%, transparent 25%, transparent 75%, #202020 75%);
+    background-size: 22px 22px;
+    background-position: 0 0, 11px 11px;
+}
+.fade-runnable__float .fade-runnable__vm {
+    aspect-ratio: 16 / 9; width: 100%; height: auto; max-width: 100%; max-height: 100%;
+    background: #000; display: block; border: 0;
+    box-shadow: 0 0 0 1px #000, 0 2px 12px rgba(0, 0, 0, 0.5);
+}
 `;
 }
 

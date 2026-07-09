@@ -7,3 +7,5 @@ export { attachFadeLanguage, applySemanticTokens, applyDiagnostics, setDebugHove
 export { renderTokenizedSnippet, highlightFadeStatic, injectSnippetCss, TOKEN_TYPE_CLASS } from './snippet';
 export { showCrashOverlay, hideCrashOverlay, summarizeCrash, extractInsIndex } from './crash-overlay';
 export type { CrashOverlayArgs, CrashErrorKind } from './crash-overlay';
+export { FADE_THEMES, FADE_THEME_PRESETS, resolveFadeTheme, fadeThemeIds, ensureFadeThemes, setFadeTheme, activeFadeMonacoTheme } from './themes';
+export type { FadeThemeDef } from './themes';

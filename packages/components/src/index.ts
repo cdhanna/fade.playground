@@ -7,4 +7,6 @@ import './fade-code';
 export { FadeRunnableElement } from './fade-runnable';
 export { FadeCodeElement } from './fade-code';
 export { armWebPreview } from './web-preview';
-export { getSharedRunner, getLspReady } from './runner-pool';
+export { getSharedRunner, getLspReady, getMonoLspReady, formatFadeSource } from './runner-pool';
+export { FADE_THEME_PRESETS, resolveFadeTheme, fadeThemeIds, ensureFadeThemes, setFadeTheme, activeFadeMonacoTheme } from '@fadebasic/editor';
+export { applyFadeTheme, getFadeTheme } from './theme';

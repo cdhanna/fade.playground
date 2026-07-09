@@ -9,6 +9,7 @@
 
 import * as monaco from 'monaco-editor';
 import type { FadeRunner } from '@fadebasic/runtime';
+import { ensureFadeThemes, injectFadeThemeCss } from './themes';
 
 // Semantic-token legend — index order must match FadeBasic.Export.Web's
 // TokenTypeLegend (the encoded stream uses indexes into this list).
@@ -17,18 +18,20 @@ const TOKEN_TYPES = [
     'parameter', 'struct', 'type', 'operator', 'number', 'string',
 ];
 
-// The FadeBasic LSP classifies these reserved control keywords as `function`
-// semantic tokens (they'd render yellow, like a function name). We remap them
-// to `keyword` so all reserved words are consistently purple.
-const KEYWORDS_TAGGED_AS_FUNCTION = new Set(['FUNCTION', 'ENDFUNCTION', 'EXITFUNCTION']);
-
-// Per-token colors (VS Code dark palette) — injected as CSS for the
-// `.fade-token-<type>` classes the decorations carry.
-const DARK_COLORS: Record<string, string> = {
-    comment: '#6A9955', keyword: '#C586C0', function: '#DCDCAA', method: '#DCDCAA',
-    macro: '#C586C0', parameter: '#9CDCFE', struct: '#4EC9B0', type: '#4EC9B0',
-    operator: '#D4D4D4', number: '#B5CEA8', string: '#CE9178',
+// The FadeBasic LSP tags a few reserved control words under a *color* semantic
+// category rather than `keyword`: FUNCTION/ENDFUNCTION/EXITFUNCTION come back as
+// `function` (yellow, like a function name) and TYPE/ENDTYPE come back as
+// `struct` (the struct-name color). They're control keywords — force them to
+// `keyword` so every reserved word reads consistently (purple). Keyed by the
+// category the LSP assigns → the exact words to reclassify.
+const FORCE_KEYWORD: Record<string, Set<string>> = {
+    function: new Set(['FUNCTION', 'ENDFUNCTION', 'EXITFUNCTION']),
+    struct: new Set(['TYPE', 'ENDTYPE']),
 };
+
+// Token colors are theme-driven and live in themes.ts (fadeThemeTokenCss),
+// injected via injectFadeThemeCss() so the editor + static snippets recolor
+// per [data-theme].
 
 // Debug-hover: when a session is paused, the hover provider evaluates the
 // hovered symbol through this callback and shows its live value. The component
@@ -62,14 +65,8 @@ export function attachFadeLanguage(runner: FadeRunner): void {
         ],
     });
 
-    monaco.editor.defineTheme('fade-dark', {
-        base: 'vs-dark',
-        inherit: true,
-        rules: TOKEN_TYPES.map((t) => ({ token: t, foreground: DARK_COLORS[t].slice(1) })),
-        colors: {},
-    });
-
-    injectTokenCss();
+    ensureFadeThemes();
+    injectFadeThemeCss();
 
     // ── LSP providers → runner ────────────────────────────────────────────
     monaco.languages.registerCompletionItemProvider('fade', {
@@ -162,10 +159,10 @@ export async function applySemanticTokens(
         if (dLine > 0) { line += dLine; ch = dChar; } else { ch += dChar; }
         let name = TOKEN_TYPES[typeIdx] ?? 'unknown';
         const range = new monaco.Range(line + 1, ch + 1, line + 1, ch + 1 + len);
-        // The LSP labels the FUNCTION-declaration keywords as `function` (same
-        // color as a function *name*). They're control keywords — color them
-        // purple like FOR/SELECT/CASE so the reserved words read consistently.
-        if (name === 'function' && KEYWORDS_TAGGED_AS_FUNCTION.has(model.getValueInRange(range).toUpperCase())) {
+        // Reclassify the handful of reserved words the LSP colors as a
+        // function/struct *name* back to `keyword` (see FORCE_KEYWORD) so
+        // FUNCTION/TYPE read purple like FOR/SELECT/CASE.
+        if (FORCE_KEYWORD[name]?.has(model.getValueInRange(range).toUpperCase())) {
             name = 'keyword';
         }
         decos.push({ range, options: { inlineClassName: 'fade-token-' + name } });
@@ -202,19 +199,3 @@ export async function applyDiagnostics(runner: FadeRunner, model: monaco.editor.
     })));
 }
 
-let cssInjected = false;
-function injectTokenCss(): void {
-    if (cssInjected || typeof document === 'undefined') return;
-    cssInjected = true;
-    // Scope under `.monaco-editor` + `!important` so these win over monaco's
-    // default token foreground (fade has no Monarch grammar, so every token is
-    // monaco's default color until these decoration classes override it). This
-    // mirrors the Playground's index.html `.monaco-editor .fade-token-*` rules.
-    const css = Object.entries(DARK_COLORS)
-        .map(([t, c]) => `.monaco-editor .fade-token-${t}{color:${c} !important;}`)
-        .join('\n') + '\n.monaco-editor .fade-token-comment{font-style:italic;}';
-    const style = document.createElement('style');
-    style.setAttribute('data-fade-tokens', '');
-    style.textContent = css;
-    document.head.appendChild(style);
-}
