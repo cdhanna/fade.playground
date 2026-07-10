@@ -4,3 +4,4 @@ public/runtime
 public/monogame-runtime
 *.log
 .vite
+*.tsbuildinfo
