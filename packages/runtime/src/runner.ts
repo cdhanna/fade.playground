@@ -764,13 +764,6 @@ export class FadeRunner {
     debugSetVariable(frameId: number, variableId: number, rhs: string): Promise<DebugEvalResult | null> {
         return this.debugTextCall('debug-set-variable', { frameId, variableId, rhs });
     }
-    private simpleDebugCall(type: string): Promise<boolean> {
-        const id = ++this.nextId;
-        return new Promise<boolean>((resolve) => {
-            this.pending.set(id, () => resolve(true));
-            this.postVm({ type, id });
-        });
-    }
     // Fire-and-forget control-plane debug call (continue / pause / step /
     // set-breakpoints / terminate). These are inherently one-way: the
     // authoritative feedback is the async `debug-event` stream (paused,
