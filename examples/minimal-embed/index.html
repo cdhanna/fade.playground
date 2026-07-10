@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@fadebasic/components — minimal embed</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 780px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #ddd; }
+      h1 { font-size: 1.3rem; }
+      p { color: #aaa; }
+      fade-runnable { margin: 1rem 0; }
+    </style>
+  </head>
+  <body>
+    <h1>FadeBasic embed — <code>&lt;fade-runnable&gt;</code></h1>
+    <p>Editable snippet with syntax highlighting, live diagnostics, and a Run button — powered by the <code>@fadebasic/*</code> packages.</p>
+
+    <fade-runnable asset-base="/runtime/">for i = 1 to 3
+  print "hello from the embed ", i
+next i</fade-runnable>
+
+    <p>A read-only fragment (highlight only, no diagnostics):</p>
+    <fade-runnable asset-base="/runtime/" readonly no-run>x# = 1.23
+message$ = "tunafish"</fade-runnable>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

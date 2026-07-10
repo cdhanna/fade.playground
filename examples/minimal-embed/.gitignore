@@ -1,0 +1,3 @@
+# Runtime assets are staged from @fadebasic/runtime-assets at build time.
+public/runtime/
+dist/

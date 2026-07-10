@@ -1,0 +1,20 @@
+{
+  "name": "@fadebasic/example-minimal-embed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "stage": "node ../../packages/runtime-assets/scripts/stage.mjs --out public/runtime",
+    "predev": "npm run stage",
+    "prebuild": "npm run stage",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fadebasic/components": "*"
+  },
+  "devDependencies": {
+    "vite": "^6.0.5"
+  }
+}

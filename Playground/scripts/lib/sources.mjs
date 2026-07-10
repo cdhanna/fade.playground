@@ -41,7 +41,14 @@ export const fadeDocsDir = process.env.FADE_DOCS
     : resolve(fadeRepoDir, 'book', 'FadeBook');
 
 // Pinned package versions (used in 'package' mode); env overrides win.
-const versions = JSON.parse(readFileSync(resolve(playgroundDir, 'runtime-versions.json'), 'utf8'));
+// The canonical pin now lives in the @fadebasic/runtime-assets package
+// (repo root: packages/runtime-assets/runtime-versions.json) — it's the
+// single source of truth shared by the Playground and the embeddable
+// component library. playgroundDir → repo root → packages/…
+const versions = JSON.parse(readFileSync(
+    resolve(playgroundDir, '..', 'packages', 'runtime-assets', 'runtime-versions.json'),
+    'utf8',
+));
 export const pkgVersions = {
     exportWeb: process.env.FADE_EXPORT_WEB_VERSION || versions.exportWeb,
     libWeb: process.env.FADE_LIB_WEB_VERSION || versions.libWeb,

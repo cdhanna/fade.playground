@@ -1,0 +1,15 @@
+{
+  "name": "@fadebasic/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DOM-free client for the FadeBasic runtime: LSP + VM + debug protocol over the runtime worker/iframe. (scaffold — Phase 2)",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ]
+}
