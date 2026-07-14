@@ -37,7 +37,16 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: Playground/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            Playground/package-lock.json
+
+      # Workspace root: installs packages/* deps (runtime-assets' fflate). The
+      # package-mode runtime staging runs out of packages/runtime-assets/, whose
+      # imports resolve against the ROOT node_modules — not Playground's — so
+      # this install is required in addition to the Playground one below.
+      - name: Install workspace root
+        run: npm ci
 
       - name: Install dependencies
         working-directory: Playground

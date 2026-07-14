@@ -45,15 +45,19 @@ export const fadeDocsDir = process.env.FADE_DOCS
 // (repo root: packages/runtime-assets/runtime-versions.json) — it's the
 // single source of truth shared by the Playground and the embeddable
 // component library. playgroundDir → repo root → packages/…
+//
+// That file pins ONLY the Fade.MonoGame release (`monogame`). The core-Fade /
+// Web runtime version is DERIVED from it (see runtime-assets/scripts/stage.mjs
+// resolveCoreFadeVersion), so it isn't surfaced here — the web build's package
+// mode calls stageWebRuntime(), which resolves it. Only the monogame versions
+// are needed here (build-monogame-runtime.mjs 'package' branch).
 const versions = JSON.parse(readFileSync(
     resolve(playgroundDir, '..', 'packages', 'runtime-assets', 'runtime-versions.json'),
     'utf8',
 ));
 export const pkgVersions = {
-    exportWeb: process.env.FADE_EXPORT_WEB_VERSION || versions.exportWeb,
-    libWeb: process.env.FADE_LIB_WEB_VERSION || versions.libWeb,
-    exportMonoGame: process.env.FADE_EXPORT_MONOGAME_VERSION || versions.exportMonoGame,
     monogame: process.env.FADE_MONOGAME_VERSION || versions.monogame,
+    exportMonoGame: process.env.FADE_EXPORT_MONOGAME_VERSION || versions.monogame,
 };
 
 // 'source' builds from the sibling repo; 'package' downloads pinned nupkgs.

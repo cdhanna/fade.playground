@@ -48,3 +48,18 @@ export async function extractFile(entries, entryPath, destFile) {
     await mkdir(dirname(destFile), { recursive: true });
     await writeFile(destFile, data);
 }
+
+// Read the declared version of a <dependency> from a nupkg's .nuspec (the one
+// *.nuspec entry at the archive root). Used to DERIVE the core-Fade version a
+// MonoGame runtime was built against, so the web + monogame runtimes always run
+// the same core VM (see stage.mjs resolveCoreFadeVersion). Throws if the
+// package declares no such dependency — a loud failure beats a silent skew.
+export function readNuspecDependency(entries, depId) {
+    const key = Object.keys(entries).find((p) => p.toLowerCase().endsWith('.nuspec'));
+    if (!key) throw new Error('[nuget] no .nuspec entry in package');
+    const xml = new TextDecoder().decode(entries[key]);
+    const re = new RegExp(`<dependency\\s+id="${depId.replace(/\./g, '\\.')}"\\s+version="([^"]+)"`, 'i');
+    const m = xml.match(re);
+    if (!m) throw new Error(`[nuget] .nuspec declares no dependency "${depId}"`);
+    return m[1];
+}

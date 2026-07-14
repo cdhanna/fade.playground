@@ -6,6 +6,7 @@
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",
     "build:monogame-runtime": "node scripts/build-monogame-runtime.mjs",
+    "build:all-source": "node scripts/build-all-source.mjs",
     "build:docs-index": "node --experimental-strip-types scripts/build-docs-index.mjs",
     "sync:public-docs": "node scripts/sync-public-docs.mjs",
     "predev": "node scripts/build-runtime.mjs && node scripts/sync-public-docs.mjs",
