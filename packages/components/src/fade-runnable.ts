@@ -26,6 +26,8 @@ export class FadeRunnableElement extends HTMLElement {
     private iframe?: HTMLIFrameElement;
     private statusEl?: HTMLElement;
     private runBtn?: HTMLButtonElement;
+    private reloadBtn?: HTMLButtonElement;
+    private runningSource = '';           // source of the currently-running program
     private armed = false;
     private armingPromise?: Promise<void>;
     private running = false;
@@ -118,6 +120,10 @@ export class FadeRunnableElement extends HTMLElement {
         });
 
         this.runBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary', 'play', 'Run', 'Run (⌘R)', () => void this.run());
+        // Reload button — hidden until the buffer diverges from the running
+        // program. Click hot-reloads changes into the live VM (state preserved).
+        this.reloadBtn = iconBtn('fade-runnable__btn fade-runnable__btn--reload', 'refresh-cw', 'Reload', 'Hot-reload changes (keeps state)', () => void this.doReload());
+        this.reloadBtn.style.display = 'none';
         // `hide-run`: show only the Debug button (Run is suppressed) — used by the
         // homepage demo, which is all about the debugger.
         this.hideRun = this.hasAttribute('hide-run') && this.debugEnabled;
@@ -255,6 +261,7 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.debugBar) toolbar.append(this.debugBar);
         if (this.debugBtn) toolbar.append(this.debugBtn);
         if (!this.hideRun) toolbar.append(this.runBtn!);
+        if (this.reloadBtn) toolbar.append(this.reloadBtn);
     }
 
     private buildThemePicker(): HTMLElement {
@@ -818,6 +825,8 @@ export class FadeRunnableElement extends HTMLElement {
         if (this.running || !this.runner || !this.iframe) return;
         this.running = true;
         if (this.runBtn) this.runBtn.disabled = true;
+        this.runningSource = this.fadeEditor!.getValue();
+        this.updateReloadButton();
         this.setStatus('');
         try {
             // Always ensureArmed — besides the one-time boot, it re-reveals the
@@ -825,14 +834,49 @@ export class FadeRunnableElement extends HTMLElement {
             if (!this.armed) this.setStatus('Loading runtime…');
             await this.ensureArmed();
             this.setStatus('');
-            const result = JSON.parse(await this.runner.run(this.fadeEditor!.getValue()));
+            const result = JSON.parse(await this.runner.run(this.runningSource));
             if (result.compileError) this.setStatus(result.compileError, true);
             else if (result.ok === false && result.error) this.setStatus(result.error, true);
         } catch (e) {
             this.setStatus(e instanceof Error ? e.message : String(e), true);
         } finally {
             this.running = false;
+            this.updateReloadButton();
             this.updateActionsEnabled();
+        }
+    }
+
+    // Show the Reload button only while a program is running AND the buffer has
+    // diverged from what's running. Clicking hot-reloads the diff into the live
+    // VM (state preserved) via the shared wire protocol — web VM or monogame.
+    private updateReloadButton(): void {
+        if (!this.reloadBtn) return;
+        const changed = this.running && !!this.fadeEditor && this.fadeEditor.getValue() !== this.runningSource;
+        this.reloadBtn.style.display = changed ? '' : 'none';
+    }
+
+    private async doReload(): Promise<void> {
+        if (!this.runner || !this.running || !this.fadeEditor) return;
+        const src = this.fadeEditor.getValue();
+        this.reloadBtn!.disabled = true;
+        try {
+            const r = await this.runner.armReload(src);
+            if (r.compileError) {
+                this.setStatus(r.compileError, true);
+            } else if (r.verdict === 'PermanentlyRude') {
+                this.setStatus('Can’t hot-reload (' + (r.rudeReason || 'incompatible change') + ') — press Run to restart', true);
+            } else {
+                // ApplicableNow / PendingTransient: the VM applies it at its next
+                // clean safepoint. Treat the new buffer as the running program.
+                this.runningSource = src;
+                this.setStatus('reloaded');
+                this.setAttribute('data-reload-verdict', r.verdict || '');
+            }
+        } catch (e) {
+            this.setStatus(e instanceof Error ? e.message : String(e), true);
+        } finally {
+            if (this.reloadBtn) this.reloadBtn.disabled = false;
+            this.updateReloadButton();
         }
     }
 
@@ -842,6 +886,7 @@ export class FadeRunnableElement extends HTMLElement {
     private onDiagnostics(errors: number): void {
         this.compileErrors = errors;
         if (this.debugEnabled) this.detectTests();   // keep the test controls in sync with edits
+        this.updateReloadButton();                    // reveal Reload when the buffer diverges from the run
         this.updateActionsEnabled();
     }
 

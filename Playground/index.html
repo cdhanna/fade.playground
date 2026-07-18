@@ -540,6 +540,46 @@
             border-bottom: 1px solid var(--border-2);
             user-select: none;
         }
+        /* Action buttons (Run/Reset, Reload, Stop, Debug, Export) as one tight
+           group. A small gap (vs the header's 1rem) keeps the strip narrow so
+           adding the Reload button never pushes the rightmost buttons off the
+           right edge. flex-shrink:0 keeps buttons from squishing; the group
+           can't be pushed past the header's right padding. */
+        /* Action buttons as one tight group, anchored to the RIGHT (the .grow
+           spacer before it pushes it there). Small gap keeps the strip compact. */
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        /* Split launch button: primary action + a narrow caret, joined with a
+           hairline gap so they read as one control. The dropdown anchors to
+           this wrapper's right edge (it lives on the right side of the header). */
+        .launch-split {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+        .launch-menu {
+            /* Reuses .view-menu styling; just re-anchor to the right edge under
+               the split button (the shared .view-menu left:0 would overflow). */
+            left: auto;
+            right: 0;
+        }
+        .launch-menu-toggle-check { color: var(--accent); }
+        /* Rude-edit state for the reload button: the edit can't apply live, so
+           it becomes a red "Restart". Colors the vscode-button's inner control. */
+        vscode-button#reload.reload-rude::part(control) {
+            background: var(--danger, #c0392b);
+            color: #fff;
+        }
+        vscode-button#reload.reload-rude {
+            --vscode-button-background: var(--danger, #c0392b);
+            --vscode-button-foreground: #fff;
+            --vscode-button-hoverBackground: #d94b3a;
+        }
         /* Cluster wrapper around the git icon + transient chips + live
            session strip. Tight 4px gap between siblings so the buttons
            sit adjacent like one logical control group, instead of being
@@ -3116,9 +3156,12 @@
         .debug-control-bar {
             position: fixed;
             top: 6px;
-            /* Snap to the right of the header, just left of the Run/Debug
-               cluster. Approximate width of Reset+Run+Debug + padding. */
-            right: 360px;
+            /* Centered horizontally on the top bar so it never overlaps the
+               right-anchored Run/Hot Load/Stop/Debug/Export cluster. The drag
+               handler switches to explicit left/top (dropping this transform)
+               once the user moves it. */
+            left: 50%;
+            transform: translateX(-50%);
             display: flex;
             align-items: center;
             gap: 0.1rem;
@@ -5476,10 +5519,35 @@
                 <div id="live-session-chip" class="live-session-chip live-session-chip-idle"></div>
             </div>
             <span class="grow"></span>
-            <vscode-button id="run" disabled icon="play">Run (⌘R)</vscode-button>
-            <vscode-button id="stop" disabled icon="debug-stop" secondary="true">Stop</vscode-button>
-            <vscode-button id="debug" disabled icon="debug-alt" secondary="true">Debug (⌘D)</vscode-button>
-            <vscode-button id="export" disabled icon="cloud-download" secondary="true">Export</vscode-button>
+            <!-- Action buttons, right-anchored (see .header-actions). -->
+            <div class="header-actions">
+                <!-- Split launch button: primary action = the selected mode
+                     (Debug by default), caret opens the launch-mode + auto
+                     hot-reload menu. Replaces the old separate Run/Debug. -->
+                <div class="launch-split" id="launch-split">
+                    <vscode-button id="launch" disabled icon="debug-alt">Debug (⌘D)</vscode-button>
+                    <vscode-button id="launch-caret" disabled icon="chevron-down" secondary="true" title="Launch options"></vscode-button>
+                    <div id="launch-menu" class="view-menu launch-menu" hidden>
+                        <div class="view-menu-section">Launch mode</div>
+                        <button class="view-menu-item" id="launch-mode-debug" data-mode="debug">
+                            <span class="check-col"></span><span class="item-label">Debug — stop at breakpoints</span>
+                        </button>
+                        <button class="view-menu-item" id="launch-mode-run" data-mode="run">
+                            <span class="check-col"></span><span class="item-label">Run — skip breakpoints</span>
+                        </button>
+                        <div class="view-menu-sep"></div>
+                        <button class="view-menu-item" id="auto-hot-reload-item">
+                            <span class="check-col"></span><span class="item-label">Auto hot reload</span>
+                        </button>
+                    </div>
+                </div>
+                <!-- Reload/Restart state button — shown while running: disabled
+                     when nothing to reload, "Hot Load" when an edit can apply,
+                     red "Restart" on a rude edit (see updateReloadButton). -->
+                <vscode-button id="reload" icon="sync" secondary="true" title="Hot Load (⌘⇧R) — hot-reload changes, keeps state" style="display:none">Hot Load</vscode-button>
+                <vscode-button id="stop" disabled icon="debug-stop" secondary="true">Stop</vscode-button>
+                <vscode-button id="export" disabled icon="cloud-download" secondary="true">Export</vscode-button>
+            </div>
         </header>
 
         <!-- VSCode's floating debug toolbar. Plain <button>s + codicon

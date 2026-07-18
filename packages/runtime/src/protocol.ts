@@ -112,6 +112,15 @@ export interface DebugStartResult {
     error?: string;
     statementLines: number[];
 }
+// Hot-reload verdict envelope (matches FadeBasic's PumpStartResult JSON).
+// verdict ∈ NoChange | ApplicableNow | PendingTransient | PermanentlyRude.
+export interface ReloadResult {
+    ok: boolean;
+    verdict?: string;
+    rudeReason?: string;
+    compileError?: string;
+    error?: string;
+}
 export interface BreakpointRequest {
     // Matches FadeBasic.Export.Web's BreakpointRequestDto (camelCase JSON).
     // 0-based line numbers — the coordinate space the lexer's tokens use.

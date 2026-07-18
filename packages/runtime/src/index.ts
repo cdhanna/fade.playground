@@ -29,6 +29,7 @@ export type {
     TestResult,
     TestRunResult,
     DebugStartResult,
+    ReloadResult,
     BreakpointRequest,
     DebugStackFrame,
     DebugVariable,

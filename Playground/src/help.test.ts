@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDocSections, groupsForEntry, extractCommandNameFromHover, findKeywordDocHeading } from './help';
+import { parseDocSections, groupsForEntry, extractCommandNameFromHover, findKeywordDocHeading, searchKeywords } from './help';
 import type { CommandDocEntry } from './help';
 
 function mg(name: string, markdown = ''): CommandDocEntry {
@@ -245,5 +245,53 @@ describe('findKeywordDocHeading', () => {
         // toLowerCase on whitespace yields whitespace — not a key in the
         // map, so we should still get null without doing anything weird.
         expect(findKeywordDocHeading('   ')).toBeNull();
+    });
+});
+
+describe('searchKeywords', () => {
+    it('ranks an exact keyword match best', () => {
+        const hits = searchKeywords('if');
+        expect(hits[0]).toMatchObject({ keyword: 'if', heading: 'Conditionals', badge: 'Keyword', score: 0 });
+    });
+
+    it('is case-insensitive', () => {
+        expect(searchKeywords('FOR')[0]).toMatchObject({ keyword: 'for', heading: 'For Loops', score: 0 });
+    });
+
+    it('matches by prefix (score 1) and substring (score 2)', () => {
+        // 'fun' is a prefix of 'function' but not exact.
+        const prefix = searchKeywords('fun').find(h => h.keyword === 'function');
+        expect(prefix?.score).toBe(1);
+        // 'unc' is a substring of 'function' but neither exact nor a prefix.
+        const substr = searchKeywords('unc').find(h => h.keyword === 'function');
+        expect(substr?.score).toBe(2);
+    });
+
+    it('badges primitive-type aliases as Type, keywords otherwise', () => {
+        expect(searchKeywords('integer')[0]).toMatchObject({ keyword: 'integer', badge: 'Type', heading: 'Primitive Types' });
+        expect(searchKeywords('byte')[0]).toMatchObject({ badge: 'Type' });
+        // 'string' maps to Strings — a keyword, not a primitive-type alias.
+        expect(searchKeywords('string')[0]).toMatchObject({ keyword: 'string', badge: 'Keyword', heading: 'Strings' });
+    });
+
+    it('gates substring matches to queries of length ≥ 2 (single char = prefix/exact only)', () => {
+        // 'o' is a substring of 'for', 'loop', 'goto', … but a single-char
+        // query must NOT flood the dropdown with all of them.
+        const single = searchKeywords('o');
+        expect(single.every(h => h.score <= 1)).toBe(true);
+        expect(single.some(h => h.keyword === 'for')).toBe(false); // 'for' does not start with 'o'
+    });
+
+    it('sorts best-first: exact before prefix before substring', () => {
+        const hits = searchKeywords('end');
+        // 'end' itself (exact, score 0) must come before 'endif' (prefix).
+        const scores = hits.map(h => h.score);
+        expect(scores).toEqual([...scores].sort((a, b) => a - b));
+        expect(hits[0].keyword).toBe('end');
+    });
+
+    it('returns nothing for empty / whitespace input', () => {
+        expect(searchKeywords('')).toEqual([]);
+        expect(searchKeywords('   ')).toEqual([]);
     });
 });

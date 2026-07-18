@@ -34,6 +34,17 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
         {
+            version: '0.7.0',
+            date: '2026-07-17',
+            added: [
+                'Support for hot reload while running game'
+            ],
+            changed: [
+                'Help docs show language keywords on search',
+                'Run and Debug buttons are combined into a dropdown'
+            ]
+        },
+        {
             version: '0.6.0',
             date: '2026-07-02',
             added: [

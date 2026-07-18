@@ -172,6 +172,50 @@ export function findKeywordDocHeading(word: string): string | null {
     return KEYWORD_DOC_HEADING_MAP[word.toLowerCase()] ?? null;
 }
 
+/** A single keyword/type hit for the global search dropdown. Mirrors the
+ *  homepage's keyword-index behavior: typing a language keyword (`if`,
+ *  `for`, `dim`, …) or a primitive-type name (`integer`, `byte`, …)
+ *  surfaces a first-class result that jumps straight to the Language.md
+ *  section documenting it — rather than relying on incidental body-text
+ *  matches. */
+export interface KeywordSearchHit {
+    /** The matched keyword as it appears in the map, e.g. 'if'. */
+    keyword: string;
+    /** Language.md heading to hand to `openDocCitation`. */
+    heading: string;
+    /** 'Type' for the primitive-type aliases (they all map to the
+     *  "Primitive Types" heading), 'Keyword' for everything else. */
+    badge: 'Keyword' | 'Type';
+    /** Lower is better. 0 = exact, 1 = prefix, 2 = substring. */
+    score: number;
+}
+
+/** Rank the fbasic keyword/type map against a search query. Pure so the
+ *  ranking can be unit-tested without mounting the panel. Substring
+ *  ('includes') matches are gated to queries of length ≥ 2 so a single
+ *  letter doesn't flood the dropdown with every keyword containing it —
+ *  exact and prefix matches always count. Sorted best-first. */
+export function searchKeywords(query: string): KeywordSearchHit[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const hits: KeywordSearchHit[] = [];
+    for (const [kw, heading] of Object.entries(KEYWORD_DOC_HEADING_MAP)) {
+        let score = -1;
+        if (kw === q) score = 0;
+        else if (kw.startsWith(q)) score = 1;
+        else if (q.length >= 2 && kw.includes(q)) score = 2;
+        if (score < 0) continue;
+        hits.push({
+            keyword: kw,
+            heading,
+            badge: heading === 'Primitive Types' ? 'Type' : 'Keyword',
+            score,
+        });
+    }
+    hits.sort((a, b) => a.score - b.score || a.keyword.length - b.keyword.length);
+    return hits;
+}
+
 /** Extract the canonical command name from an LSP hover-markdown body.
  *
  *  The LSP's `BuildCommandMarkdown` emits `### <commandname>\n<body>`
@@ -1316,6 +1360,32 @@ export function mountHelpPanel(services: HelpServices = {}): HelpController {
     function searchAll(query: string): SearchResult[] {
         const q = query.toLowerCase();
         const hits: ScoredResult[] = [];
+
+        // Language keywords + primitive types (ported from the homepage's
+        // search index). Typing `if`, `for`, `dim`, `integer`, … surfaces a
+        // first-class hit that jumps to the Language.md section documenting
+        // it, instead of leaving the user to hunt through incidental
+        // body-text matches. Scored into the negative range so an exact
+        // keyword match floats above command/body hits (which start at 0).
+        // Deduped by heading+badge so the four Conditionals keywords
+        // (if/then/else/endif) don't return four identical rows for the
+        // same query — we keep the best-scoring representative.
+        const seenKeywordDest = new Set<string>();
+        for (const kw of searchKeywords(query)) {
+            const destKey = `${kw.badge}::${kw.heading}`;
+            if (seenKeywordDest.has(destKey)) continue;
+            seenKeywordDest.add(destKey);
+            const label = kw.badge === 'Type' ? 'Primitive data type' : 'Language keyword';
+            hits.push({
+                score: -100 + kw.score,
+                result: {
+                    badge: kw.badge,
+                    title: kw.keyword,
+                    snippetHtml: escapeHtml(`${label} · jumps to “${kw.heading}” in the Language reference.`),
+                    navigate: () => { void openDocCitation('Language.md', kw.heading); },
+                },
+            });
+        }
 
         // Commands — match against name (high weight) and markdown body.
         for (const e of entries) {

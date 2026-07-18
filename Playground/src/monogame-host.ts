@@ -77,6 +77,8 @@
 //                                              Forwarded via onDebugUiFrame
 //                                              for the Tweakpane panel.
 
+import type { ReloadResult } from '@fadebasic/runtime';
+
 const IFRAME_SRC = '/runtime/monogame/index.html?preview=1';
 const IFRAME_ELEMENT_ID = 'mg-preview-frame';
 
@@ -549,6 +551,21 @@ class MonoGameHost {
             return !!parsed.ok;
         } catch {
             return false;
+        }
+    }
+
+    // State-preserving hot reload — arms the new source against the LIVE game VM
+    // (Game1's ModuleReloader), which applies the diff at the next frame
+    // safepoint. Mirrors the web runner's armReload; same verdict envelope so
+    // main.ts's doReload handles both hosts uniformly. Distinct from loadProgram,
+    // which does a full swap (rebuilds the VM, resets state).
+    async armReload(source: string): Promise<ReloadResult> {
+        await this.ensureBooted();
+        const resultJson = await this.call<string>({ type: 'reload-arm', source });
+        try {
+            return JSON.parse(resultJson) as ReloadResult;
+        } catch {
+            return { ok: false, error: 'reload-arm: bad reply' };
         }
     }
 

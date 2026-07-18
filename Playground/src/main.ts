@@ -233,11 +233,15 @@ const MONOGAME_STARTER_SOURCE = [
 const DEFAULT_SOURCE = WEB_STARTER_SOURCE;
 
 // ─── DOM refs ───────────────────────────────────────────────────────────────
-// runBtn is a <vscode-button> custom element; it accepts `disabled` as an
-// attribute just like a native button, but it isn't an HTMLButtonElement.
-const runBtn = document.getElementById('run') as HTMLElement & { disabled: boolean };
+// Split launch button: `launchBtn` is the primary action (Debug or Run per the
+// selected mode; morphs to Reset/Restart while running); `launchCaretBtn` opens
+// the launch-mode + auto-hot-reload dropdown. These are <vscode-button> custom
+// elements — they accept `disabled` as an attribute but aren't HTMLButtonElement.
+const launchBtn = document.getElementById('launch') as HTMLElement & { disabled: boolean };
+const launchCaretBtn = document.getElementById('launch-caret') as HTMLElement & { disabled: boolean };
+const launchMenu = document.getElementById('launch-menu') as HTMLElement;
+const reloadBtn = document.getElementById('reload') as HTMLElement & { disabled: boolean };
 const stopBtn = document.getElementById('stop') as HTMLElement & { disabled: boolean };
-const debugBtn = document.getElementById('debug') as HTMLElement & { disabled: boolean };
 const exportBtn = document.getElementById('export') as HTMLElement & { disabled: boolean };
 const viewMenuBtn = document.getElementById('view-menu-btn') as HTMLElement;
 const viewMenu = document.getElementById('view-menu') as HTMLElement;
@@ -2843,6 +2847,30 @@ async function bootstrap() {
     // when a new debug session begins.
     let debugFatalException = false;
     let runActive = false;
+    // Source of the currently-running program. Non-null only between a run's
+    // start and its teardown; drives the Reload button's divergence check and is
+    // the "old side" the hot-reload diff runs against. Both web (worker VM) and
+    // monogame (iframe ModuleReloader) support state-preserving reload.
+    let runningSource: string | null = null;
+    // Declared here (not beside updateReloadButton, ~700 lines down) because
+    // refreshRunButtons() — which runs during early bootstrap — calls
+    // updateReloadButton(), which reads these. As block-scoped bindings they'd
+    // be in the temporal dead zone until their declaration executed, so a
+    // bootstrap-time refreshRunButtons() threw "Cannot access 'reloadInFlight'
+    // before initialization" and left the button logic wedged.
+    const reloadSupported = () => currentProject?.type === 'web' || currentProject?.type === 'monogame';
+    let reloadInFlight = false;
+    // Launch-mode split button + auto hot-reload. `launchMode` picks what the
+    // primary button does (Debug = stop at breakpoints, Run = skip them);
+    // `autoHotReload` (default ON) auto-applies edits to the running program
+    // ~600ms after typing. `reloadRude` flags that the current divergence can't
+    // apply live → the Hot Load button turns red "Restart". All persisted.
+    const LAUNCH_MODE_KEY = 'fade.launchMode';
+    const AUTO_HOT_RELOAD_KEY = 'fade.autoHotReload';
+    let launchMode: 'debug' | 'run' =
+        localStorage.getItem(LAUNCH_MODE_KEY) === 'run' ? 'run' : 'debug';
+    let autoHotReload = localStorage.getItem(AUTO_HOT_RELOAD_KEY) !== 'false'; // default ON
+    let reloadRude = false;
     let testsBusy = false;
     let exportBusy = false;
     // True when SOME OTHER peer is actively running or debugging in this
@@ -9066,6 +9094,11 @@ async function bootstrap() {
                     // stopAll(); runActive remains true so Reset is
                     // available.
                     updateGameStatus('running');
+                    // Remember the running source so the Reload button can detect
+                    // divergence; monogame hot-reload routes through the iframe's
+                    // ModuleReloader (Game1 F2 path), same wire shape as web.
+                    runningSource = source;
+                    void updateReloadButton();
                     refreshStopButton();
                 } else {
                     appendOutputLine(
@@ -9101,6 +9134,10 @@ async function bootstrap() {
             await ensureWebPreviewArmed();
             // Stop is already enabled by runActive (set at runOnce entry).
             refreshStopButton();
+            // Remember what we're about to run so the Reload button can detect
+            // divergence and the hot-reload diff has an "old side" to compare to.
+            runningSource = source;
+            void updateReloadButton();
             const result = await runner.run(source);
             let env: { ok?: boolean; error?: string | null; compileError?: string | null } | null = null;
             try { env = JSON.parse(result); } catch { env = null; }
@@ -9116,23 +9153,219 @@ async function bootstrap() {
             appendOutputLine(e?.message ?? String(e), 'error');
         } finally {
             runActive = false;
+            runningSource = null;
+            void updateReloadButton();
             refreshRunButtons();
             refreshStopButton();
         }
     };
 
-    // Click handler that respects the Run / Reset duality. When a run
-    // is in flight (and no debug session blocks us), tear it down
-    // before starting a fresh one — single click instead of Stop-then-
-    // Run. ⌘R does the same.
-    const runOrReset = async () => {
-        if (runActive && !debugSessionActive) {
+    // ─── Split launch button (Debug / Run + auto hot-reload) ──────────
+    // Launch (or restart) in a given mode: tear down any live session first,
+    // then start. runOnce (run) / startDebug (debug) each capture the current
+    // source into runningSource for the hot-reload diff.
+    const launchInMode = async (mode: 'debug' | 'run') => {
+        if (runActive || debugSessionActive) {
             try { await stopAll(); } catch { /* best effort */ }
         }
-        await runOnce();
+        if (mode === 'debug') await startDebug();
+        else await runOnce();
     };
-    runBtn.addEventListener('click', runOrReset);
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyR, runOrReset);
+    // Primary click: launch the selected mode, or — while running — restart the
+    // CURRENT session's mode (the label already reads Reset / Restart Debugging).
+    const onLaunchClick = async () => {
+        if (debugSessionActive) await launchInMode('debug');
+        else if (runActive) await launchInMode('run');
+        else await launchInMode(launchMode);
+    };
+    launchBtn.addEventListener('click', () => void onLaunchClick());
+    // Direct-mode shortcuts, independent of the selected default.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyR, () => void launchInMode('run'));
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD, () => void launchInMode('debug'));
+
+    // Launch-mode + auto-hot-reload dropdown (mirrors the View menu pattern).
+    const launchModeDebugItem = document.getElementById('launch-mode-debug')!;
+    const launchModeRunItem = document.getElementById('launch-mode-run')!;
+    const autoHotReloadItem = document.getElementById('auto-hot-reload-item')!;
+    function renderLaunchMenu() {
+        const setCheck = (el: HTMLElement, on: boolean) => {
+            const c = el.querySelector('.check-col');
+            if (c) c.textContent = on ? '✓' : '';
+        };
+        setCheck(launchModeDebugItem, launchMode === 'debug');
+        setCheck(launchModeRunItem, launchMode === 'run');
+        setCheck(autoHotReloadItem, autoHotReload);
+    }
+    function openLaunchMenu() {
+        renderLaunchMenu();
+        launchMenu.removeAttribute('hidden');
+        setTimeout(() => document.addEventListener('click', onLaunchMenuOutside), 0);
+    }
+    function closeLaunchMenu() {
+        launchMenu.setAttribute('hidden', '');
+        document.removeEventListener('click', onLaunchMenuOutside);
+    }
+    function onLaunchMenuOutside(e: MouseEvent) {
+        if (!launchMenu.contains(e.target as Node) && !launchCaretBtn.contains(e.target as Node)) {
+            closeLaunchMenu();
+        }
+    }
+    launchCaretBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (launchMenu.hasAttribute('hidden')) openLaunchMenu();
+        else closeLaunchMenu();
+    });
+    const setLaunchMode = (mode: 'debug' | 'run') => {
+        launchMode = mode;
+        try { localStorage.setItem(LAUNCH_MODE_KEY, mode); } catch { /* ignore */ }
+        renderLaunchMenu();
+        refreshRunButtons(); // update the primary button label/icon
+    };
+    launchModeDebugItem.addEventListener('click', () => { setLaunchMode('debug'); closeLaunchMenu(); });
+    launchModeRunItem.addEventListener('click', () => { setLaunchMode('run'); closeLaunchMenu(); });
+    autoHotReloadItem.addEventListener('click', () => {
+        autoHotReload = !autoHotReload;
+        try { localStorage.setItem(AUTO_HOT_RELOAD_KEY, String(autoHotReload)); } catch { /* ignore */ }
+        renderLaunchMenu(); // leave the menu open so the toggle state is visible
+    });
+
+    // ─── Hot reload (state-preserving) ────────────────────────────────
+    // The reload button is shown while a program is running/debugging. It is:
+    //   • disabled          — nothing to reload (buffer matches what's running)
+    //   • enabled "Hot Load" — an edit is pending; click applies it live
+    //   • red "Restart"     — the edit is rude (can't apply live); click restarts
+    // Auto hot reload (default ON) applies edits ~600ms after typing, so the
+    // button is mostly an indicator; with auto OFF it's the manual apply.
+    async function updateReloadButton(): Promise<void> {
+        if (!reloadBtn) return;
+        const running = (runActive || debugSessionActive) && runningSource != null && reloadSupported();
+        if (!running) {
+            reloadBtn.style.display = 'none';
+            reloadBtn.classList.remove('reload-rude');
+            reloadRude = false;
+            return;
+        }
+        reloadBtn.style.display = '';
+        let diverged = false;
+        if (!projectHasCompileErrors()) {
+            try {
+                const cur = await getProjectSource();
+                diverged = !!cur && cur !== runningSource;
+            } catch { diverged = false; }
+        }
+        if (!diverged) reloadRude = false; // the rude/divergent edit was reverted/fixed
+        if (reloadRude) {
+            reloadBtn.classList.add('reload-rude');
+            reloadBtn.setAttribute('icon', 'debug-restart');
+            reloadBtn.textContent = 'Restart';
+            reloadBtn.title = 'This edit can’t hot-reload — click to restart with the new code';
+            reloadBtn.disabled = reloadInFlight;
+        } else {
+            reloadBtn.classList.remove('reload-rude');
+            reloadBtn.setAttribute('icon', 'sync');
+            reloadBtn.textContent = 'Hot Load';
+            reloadBtn.title = 'Hot Load (⌘⇧R) — apply changes, keep state';
+            reloadBtn.disabled = reloadInFlight || !diverged;
+        }
+    }
+
+    // Arming only CLASSIFIES + queues the edit; the VM commits it later, at a
+    // clean statement boundary. So we must not claim "applied" off the arm
+    // verdict — the commit can be deferred (the edited statement stays active).
+    // Poll the real status until the pending edit clears (verdict → NoChange =
+    // committed). Web exposes reloadStatus(); the monogame iframe has no status
+    // channel yet, so there we can only report "armed". Returns the outcome.
+    const confirmReloadApplied = async (): Promise<'applied' | 'pending' | 'rude' | 'unknown'> => {
+        if (currentProject?.type !== 'web') return 'unknown';
+        for (let i = 0; i < 40; i++) {           // ~4s
+            await new Promise((r) => setTimeout(r, 100));
+            let st;
+            try { st = await runner.reloadStatus(); } catch { continue; }
+            if (st?.verdict === 'NoChange') return 'applied';
+            if (st?.verdict === 'PermanentlyRude') return 'rude';
+        }
+        return 'pending';
+    };
+
+    // Arm + apply the current buffer to the live VM. Shared by the manual Hot
+    // Load click and the debounced auto-reload. Sets `reloadRude` when the edit
+    // can't apply live (→ button turns red "Restart"); clears it on success.
+    // `quiet` suppresses Output-panel chatter (used for auto reloads).
+    const armAndApply = async (source: string, opts: { quiet?: boolean } = {}): Promise<void> => {
+        if (reloadInFlight) return;
+        reloadInFlight = true;
+        void updateReloadButton();
+        const say = (msg: string, kind: 'dim' | 'error' = 'dim') => { if (!opts.quiet) appendOutputLine(msg, kind); };
+        try {
+            // Route to the host that owns the live VM: the web worker (runner)
+            // or the monogame iframe (Game1's ModuleReloader). Same envelope.
+            const r = currentProject?.type === 'monogame'
+                ? await monoGameHost.armReload(source)
+                : await runner.armReload(source);
+            if (r.compileError) { say('Reload compile failed. See Problems panel.', 'error'); if (!opts.quiet) revealPanel('problems'); return; }
+            if (r.error) { say('Reload failed: ' + r.error, 'error'); return; }
+            if (r.verdict === 'PermanentlyRude') {
+                reloadRude = true;
+                say('Can’t hot-reload (' + (r.rudeReason || 'incompatible change') + ') — press Restart.', 'error');
+                return;
+            }
+            const outcome = await confirmReloadApplied();
+            if (outcome === 'applied' || outcome === 'unknown') {
+                runningSource = source;  // the running program IS this buffer now
+                reloadRude = false;
+                say(outcome === 'unknown' ? 'Hot reload applied (next frame).' : 'Hot reload applied — state preserved.');
+            } else if (outcome === 'rude') {
+                reloadRude = true;
+                say('Can’t hot-reload (incompatible change) — press Restart.', 'error');
+            } else {
+                say('Hot reload waiting for a safe point — applies once the edited code isn’t running.');
+            }
+        } catch (e: any) {
+            say('Reload failed: ' + (e?.message ?? String(e)), 'error');
+        } finally {
+            reloadInFlight = false;
+            void updateReloadButton();
+        }
+    };
+
+    // Manual Hot Load / Restart button (and ⌘⇧R).
+    const onReloadClick = async () => {
+        if (!runActive && !debugSessionActive) return;
+        if (reloadRude) {
+            // Button is "Restart" — full re-launch in the current session's mode.
+            await launchInMode(debugSessionActive ? 'debug' : (runActive ? 'run' : launchMode));
+            return;
+        }
+        if (!reloadSupported() || runningSource == null) return;
+        const source = await getProjectSource();
+        if (!source || source === runningSource) { void updateReloadButton(); return; }
+        if (projectHasCompileErrors()) {
+            appendOutputLine('Fix compile errors before reloading. See Problems panel.', 'error');
+            revealPanel('problems');
+            return;
+        }
+        await armAndApply(source, { quiet: false });
+    };
+    reloadBtn.addEventListener('click', () => void onReloadClick());
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyR, () => void onReloadClick());
+
+    // On every edit: refresh the reload button immediately (cheap divergence
+    // check), and — when Auto hot reload is ON — debounce ~600ms and auto-apply
+    // the change to the running program. armAndApply sets reloadRude if the edit
+    // can't apply live (button goes red "Restart"). Auto OFF → manual click only.
+    let autoReloadTimer: number | undefined;
+    editor.onDidChangeModelContent(() => {
+        void updateReloadButton();
+        if (!autoHotReload) return;
+        window.clearTimeout(autoReloadTimer);
+        autoReloadTimer = window.setTimeout(async () => {
+            if (!(runActive || debugSessionActive) || !reloadSupported() || runningSource == null) return;
+            if (reloadInFlight || projectHasCompileErrors()) return;
+            const source = await getProjectSource();
+            if (!source || source === runningSource) return;
+            await armAndApply(source, { quiet: true });
+        }, 600);
+    });
 
     // Export: build a static zip containing the runtime + the user's
     // compiled bytecode + the project's command DLLs + a synthesized
@@ -9730,27 +9963,26 @@ async function bootstrap() {
     // toggling the buttons directly so the four signals don't fight.
     function refreshRunButtons() {
         const hasErr = projectHasCompileErrors();
-        // Run button morphs into "Reset" while a run is in flight and
-        // nothing else (debug, compile errors) is blocking — one click
-        // tears down the live run and starts a fresh one. Stop stays
-        // available separately so users can still halt without
-        // re-running.
-        const isReset = runActive && !debugSessionActive && !hasErr;
-        if (isReset) {
-            runBtn.disabled = false;
-            runBtn.textContent = 'Reset';
-            runBtn.setAttribute('icon', 'refresh');
+        // The split launch button morphs into "Reset"/"Restart Debugging" while
+        // a run OR debug session is in flight — one click tears down and
+        // re-launches in the current mode. Stop stays available separately.
+        const running = runActive || debugSessionActive;
+        if (running) {
+            launchBtn.disabled = false;
+            launchBtn.textContent = debugSessionActive ? 'Restart Debugging' : 'Reset';
+            launchBtn.setAttribute('icon', 'refresh');
         } else {
-            // Observer side: also disable Run while a remote peer owns
-            // the runtime — the host has control, double-launching would
-            // be a no-op locally (we'd run our copy independently) which
-            // confuses the shared-session narrative.
-            runBtn.disabled = hasErr || debugSessionActive || runActive || remoteActivityInProgress;
-            runBtn.textContent = 'Run (⌘R)';
-            runBtn.setAttribute('icon', 'play');
+            // Not running: primary action = the selected launch mode. Disabled
+            // on compile errors or while a remote peer owns the runtime (an
+            // observer double-launching would confuse the shared session).
+            launchBtn.disabled = hasErr || remoteActivityInProgress;
+            launchBtn.textContent = launchMode === 'debug' ? 'Debug (⌘D)' : 'Run (⌘R)';
+            launchBtn.setAttribute('icon', launchMode === 'debug' ? 'debug-alt' : 'play');
         }
-        debugBtn.disabled = hasErr || debugSessionActive || runActive || remoteActivityInProgress;
+        // The caret only opens the mode/auto-reload settings menu — always usable.
+        launchCaretBtn.disabled = false;
         exportBtn.disabled = exportBusy || hasErr;
+        void updateReloadButton();   // reveal/hide Reload as run/error/debug state changes
         lastBlockedByErrors = hasErr;
         // Broadcast this peer's current runtime activity to the live
         // session so others' top-bar pills can show "Alice is running"
@@ -10991,6 +11223,28 @@ async function bootstrap() {
                 console.log('[DBG-EV] BREAKPOINT refreshDebugView done', frames[0]?.lineNumber);
                 break;
             }
+            case 'REV_REQUEST_RESTART': {
+                // The runtime rebound its debug session — an F1 full restart OR a
+                // state-preserving hot reload (RestartAfterReload). It cleared its
+                // breakpoint set and is asking us, the breakpoint owner, to re-send
+                // them so they re-resolve against the new program. This is what
+                // keeps breakpoints + the debugger alive across a reload.
+                if (debugSessionActive) {
+                    syncBreakpointsToWorker();
+                    // A reload while debugging means the running program is now the
+                    // edited buffer; clear divergence so the Reload button hides.
+                    runningSource = await getProjectSource().catch(() => runningSource);
+                    void updateReloadButton();
+                    // If we were paused, a state-preserving reload keeps us paused —
+                    // refresh the call stack / current line to the reloaded program's
+                    // (remapped) location instead of leaving the stale pre-reload view.
+                    if (debugPaused) {
+                        const frames = await fetchPausedFramesAndBroadcast();
+                        await refreshDebugView(frames);
+                    }
+                }
+                break;
+            }
             case 'REV_REQUEST_EXITED':
             case 'complete':
                 // For a debug-test session, snapshot the test's result
@@ -11351,6 +11605,9 @@ async function bootstrap() {
             revealPanel('problems');
             return;
         }
+        // Remember what's running so the Reload button can detect divergence and
+        // hot-reload against the live debug session (state-preserving).
+        runningSource = source;
         await beginDebugSession(() => dbg.start(source));
     };
 
@@ -11440,8 +11697,8 @@ async function bootstrap() {
         await beginDebugSession(() => dbg.startTest(source, name));
     }
 
-    debugBtn.addEventListener('click', startDebug);
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD, startDebug);
+    // (Debug launch is now driven by the split launch button + ⌘D, wired near
+    // onLaunchClick above; the old separate #debug button is gone.)
 
     // Resolve the test entry whose body contains a given (1-based) line. We
     // don't have end-of-test offsets in the manifest, so we treat each test
@@ -12141,6 +12398,17 @@ async function bootstrap() {
     (window as any).__fadeRunnerHelpers = {
         listTests: ({ source }: { source: string }) => runner.listTests(source),
         runTests: ({ source, name }: { source: string; name?: string }) => runner.runTests(source, name),
+        // Hot reload: arm a new source against the running program. Routes to the
+        // host that owns the live VM (web worker vs monogame iframe), matching
+        // doReload — otherwise a monogame probe would arm the idle web worker.
+        armReload: ({ source }: { source: string }) =>
+            currentProject?.type === 'monogame' ? monoGameHost.armReload(source) : runner.armReload(source),
+        // Monogame has no status channel; report NoChange (the "applied"/idle
+        // signal) so probe poll loops don't hang on it.
+        reloadStatus: () =>
+            currentProject?.type === 'monogame'
+                ? Promise.resolve({ ok: true, verdict: 'NoChange' })
+                : runner.reloadStatus(),
         // Direct LSP completion query — used by probes to verify the
         // C# side returns the expected items independent of Monaco's
         // filter/sorting pipeline. Pass the same URI Monaco uses on the
@@ -12187,6 +12455,21 @@ async function bootstrap() {
                 dbg.repl(frameId, code),
             setVariable: ({ frameId, variableId, rhs }: { frameId: number; variableId: number; rhs: string }) =>
                 dbg.setVariable(frameId, variableId, rhs),
+            // Set GUTTER breakpoints (1-based lines) on the active model — the
+            // same source of truth (breakpointsByUri) a user's glyph-margin click
+            // populates, so probes exercise the real re-sync-on-reload path
+            // (REV_REQUEST_RESTART → syncBreakpointsToWorker), not just the
+            // lower-level adapter setBreakpoints.
+            setGutterBreakpoints: ({ lines }: { lines: number[] }) => {
+                const model = editor?.getModel();
+                if (!model) return false;
+                const uri = model.uri.toString();
+                breakpointsByUri.set(uri, new Set(lines));
+                refreshBreakpointDecorations();
+                renderBreakpoints();
+                if (debugSessionActive) syncBreakpointsToWorker();
+                return true;
+            },
         },
     };
 

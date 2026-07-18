@@ -18,6 +18,7 @@ import type {
     TestResult,
     TestRunResult,
     DebugStartResult,
+    ReloadResult,
     BreakpointRequest,
     DebugStackFrame,
     DebugScopesResult,
@@ -29,6 +30,11 @@ import type {
     CompletionItem,
     SnippetToken,
 } from './protocol';
+
+function parseReload(json: string): ReloadResult {
+    try { return JSON.parse(json) as ReloadResult; }
+    catch { return { ok: false, error: 'bad reload reply' }; }
+}
 
 export class FadeRunner {
     // One worker for LSP traffic — never executes user code, stays
@@ -177,6 +183,8 @@ export class FadeRunner {
             if (r) r(msg.result);
             return;
         }
+        if (msg.type === 'reload-arm-result'
+            || msg.type === 'reload-status-result')   { this.resolvePending(msg.id, msg.result); return; }
         if (msg.type === 'lsp-check-result')          { this.resolvePending(msg.id, msg.diagnostics); return; }
         if (msg.type === 'lsp-tokens-result')         { this.resolvePending(msg.id, msg.tokens); return; }
         if (msg.type === 'lsp-hover-result')          { this.resolvePending(msg.id, msg.hover); return; }
@@ -297,6 +305,26 @@ export class FadeRunner {
     // active is a no-op.
     stopRun(): void {
         this.postVm({ type: 'stop-run' });
+    }
+
+    // Hot reload: arm a new source against the running program. Resolves with the
+    // verdict envelope. The VM applies an applicable edit at its next clean
+    // statement boundary (state-preserving) — no restart. Works for both the web
+    // VM and the monogame iframe (same wire protocol).
+    armReload(source: string): Promise<ReloadResult> {
+        const id = ++this.nextId;
+        return new Promise<ReloadResult>((resolve) => {
+            this.pending.set(id, (json: string) => resolve(parseReload(json)));
+            this.postVm({ type: 'reload-arm', id, source });
+        });
+    }
+
+    reloadStatus(): Promise<ReloadResult> {
+        const id = ++this.nextId;
+        return new Promise<ReloadResult>((resolve) => {
+            this.pending.set(id, (json: string) => resolve(parseReload(json)));
+            this.postVm({ type: 'reload-status', id });
+        });
     }
 
     setDocument(uri: string, text: string) {
