@@ -4,6 +4,43 @@
 <head>
     <meta charset="UTF-8" />
     <title>Fade Land</title>
+    <!-- Cross-site slide-in. The marketing homepage's "Try Online" button exits
+         to the LEFT and navigates here with ?fadeEnter=slide. The boot SPLASH is
+         static HTML present at first paint, so we slide IT in from the right at
+         load — matching the homepage's exit for a continuous cross-site slide.
+         The splash then loads + fades out normally. The param is stripped so a
+         refresh doesn't replay it. -->
+    <script>
+        (function () {
+            try {
+                var p = new URLSearchParams(location.search);
+                if (p.has('fadeEnter')) {
+                    var slide = p.get('fadeEnter') === 'slide'
+                        && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+                    if (slide) {
+                        document.documentElement.classList.add('fade-enter-slide');
+                        // Detach the animation + lift the overflow clamp once it
+                        // finishes (the splash keeps loading at its rest position).
+                        setTimeout(function () {
+                            document.documentElement.classList.remove('fade-enter-slide');
+                        }, 520);
+                    }
+                    p.delete('fadeEnter');
+                    var q = p.toString();
+                    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+                }
+            } catch (e) { /* non-fatal */ }
+        })();
+    </script>
+    <style>
+        @keyframes pg-splash-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        /* Slide the boot splash in from the right; clip so the off-screen start
+           can't spawn a horizontal scrollbar. */
+        html.fade-enter-slide, html.fade-enter-slide body { overflow-x: hidden; }
+        html.fade-enter-slide #pg-splash {
+            animation: pg-splash-in 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+    </style>
     <!-- Favicon: Lee the ghost, the FadeBasic mascot. The 128px PNG
          scales cleanly to the 16/32/48px sizes browsers actually render
          in tabs; the full-res variant doubles as the iOS home-screen

@@ -30,4 +30,4 @@ workers_dev = true
 #     running malicious code on the same machine, in which case the
 #     worker is the least of your problems.)
 [vars]
-ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://fade-playground.pages.dev,https://tests.fade-playground.pages.dev"
+ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://fade-playground.pages.dev,https://tests.fade-playground.pages.dev,https://dev.fadebasic.com"
