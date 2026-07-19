@@ -80,6 +80,17 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         // "stuck" as you scroll past it.
         scrollbar: { alwaysConsumeMouseWheel: false },
         glyphMargin: opts.glyphMargin ?? false,
+        // Keep the left gutter tight: these embedded snippets are short and
+        // read-mostly, so we don't want a wide, mostly-dead margin. Reserve room
+        // for ~3 line-number digits (not 5), drop the folding margin, and trim
+        // the decoration gap — reclaiming that width for the code/debug area.
+        // `selectOnLineNumbers: false` lets a click anywhere in the line-number
+        // gutter toggle a breakpoint (see onBreakpointToggle) instead of
+        // selecting the whole line, so the clickable target is the full gutter.
+        lineNumbersMinChars: 3,
+        folding: false,
+        lineDecorationsWidth: 6,
+        selectOnLineNumbers: false,
         fontSize: 14,
         // Match the static snippet highlighter (fade-code) exactly — same
         // family, size, and line box — so text that morphs from a snippet into
@@ -91,6 +102,8 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
 
     let bpDecos: string[] = [];
     let curLineDecos: string[] = [];
+    // View-zone id for the "past the end" current-line marker (see setCurrentLine).
+    let endZoneId: string | null = null;
 
     let decorations: string[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -125,9 +138,14 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
         setValue: (text: string) => model.setValue(text),
         onBreakpointToggle: (cb) => {
             editor.onMouseDown((e) => {
-                if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && e.target.position) {
-                    cb(e.target.position.lineNumber);
-                }
+                // The whole gutter — glyph margin AND line numbers — toggles a
+                // breakpoint, so you don't have to hit a narrow strip on the far
+                // left. (Line-number selection is disabled via selectOnLineNumbers.)
+                const t = e.target.type;
+                const inGutter =
+                    t === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN ||
+                    t === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS;
+                if (inGutter && e.target.position) cb(e.target.position.lineNumber);
             });
         },
         setBreakpointLines: (lines) => {
@@ -137,6 +155,29 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
             })));
         },
         setCurrentLine: (line) => {
+            // Clear any prior "past the end" zone before repainting.
+            if (endZoneId != null) {
+                const id = endZoneId;
+                editor.changeViewZones((acc) => acc.removeZone(id));
+                endZoneId = null;
+            }
+            // The program's final steppable stop (the compiler's trailing NOOP)
+            // lands just past the last statement — which can be past the last line
+            // of the model, or on a trailing blank/comment line. Either way it's
+            // NOT a real code stop (comments/blank lines carry no bytecode, so the
+            // debugger never legitimately pauses on one), so render it as an
+            // "end of program" marker on a virtual line past the code rather than a
+            // clamped/mid-file highlight.
+            if (line != null && isNonCodeLine(model, line)) {
+                curLineDecos = editor.deltaDecorations(curLineDecos, []);
+                editor.changeViewZones((acc) => {
+                    const dom = document.createElement('div');
+                    dom.className = 'fade-current-endzone';
+                    endZoneId = acc.addZone({ afterLineNumber: model.getLineCount(), heightInLines: 1, domNode: dom });
+                });
+                editor.revealLineInCenterIfOutsideViewport(model.getLineCount());
+                return;
+            }
             curLineDecos = editor.deltaDecorations(curLineDecos, line == null ? [] : [{
                 range: new monaco.Range(line, 1, line, 1),
                 options: { isWholeLine: true, className: 'fade-current-line', glyphMarginClassName: 'fade-current-line-glyph' },
@@ -152,6 +193,16 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
     };
 }
 
+// A blank or comment line is never a real step target (comments/blank lines
+// carry no bytecode), so a debugger stop that lands on one is the program's
+// synthetic end stop — used to decide when to render the "end of program"
+// marker past the code instead of a normal current-line highlight.
+function isNonCodeLine(model: monaco.editor.ITextModel, line: number): boolean {
+    if (line > model.getLineCount()) return true;
+    const text = model.getLineContent(line).trim();
+    return text === '' || text.startsWith('`') || /^rem(start|end)?\b/i.test(text);
+}
+
 let debugCssInjected = false;
 function ensureDebugCss(): void {
     if (debugCssInjected || typeof document === 'undefined') return;
@@ -162,10 +213,24 @@ function ensureDebugCss(): void {
 .monaco-editor .fade-bp { background: radial-gradient(circle, #e51400 45%, transparent 50%); cursor: pointer; }
 .monaco-editor .fade-current-line { background: rgba(255, 221, 51, 0.14); }
 .monaco-editor .fade-current-line-glyph { background: radial-gradient(circle, #ffcc00 45%, transparent 50%); }
-/* The glyph margin toggles breakpoints on click — show a pointer over it
-   (including empty lines) so it reads as clickable. Line numbers stay default. */
+/* Current-line marker rendered on a virtual line PAST the last line of code
+   (the program's final stop). A highlighted strip with a left accent + a faint
+   label so it reads as "end of program". */
+.fade-current-endzone {
+    width: 100%; height: 100%; box-sizing: border-box;
+    background: rgba(255, 221, 51, 0.14);
+    box-shadow: inset 3px 0 0 #ffcc00;
+    display: flex; align-items: center;
+}
+.fade-current-endzone::after {
+    content: "end of program";
+    margin-left: 10px; font-size: 11px; font-style: italic;
+    color: rgba(255, 221, 51, 0.75);
+}
+/* The whole gutter — glyph margin AND line numbers — toggles breakpoints on
+   click, so show a pointer across all of it (including empty lines). */
 .monaco-editor .margin-view-overlays { cursor: pointer; }
-.monaco-editor .margin-view-overlays .line-numbers { cursor: default; }
+.monaco-editor .margin-view-overlays .line-numbers { cursor: pointer; }
 `;
     document.head.appendChild(style);
 }

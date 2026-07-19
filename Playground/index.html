@@ -3704,6 +3704,21 @@
         .fade-current::before {
             color: #ffcc00 !important;
         }
+        /* Current-line marker rendered on a virtual line PAST the last line of
+           code (the program's final stop, where the model has no real line).
+           A highlighted strip with a left accent + faint label → "end of
+           program". Rendered via a Monaco view zone (see setCurrentLine). */
+        .fade-current-endzone {
+            width: 100%; height: 100%; box-sizing: border-box;
+            background: rgba(255, 220, 0, 0.18);
+            box-shadow: inset 3px 0 0 #ffcc00;
+            display: flex; align-items: center;
+        }
+        .fade-current-endzone::after {
+            content: "end of program";
+            margin-left: 10px; font-size: 11px; font-style: italic;
+            color: rgba(255, 204, 0, 0.8);
+        }
         /* When the paused line ALSO has a breakpoint, Monaco renders both
            glyphs into the same gutter slot and the yellow arrow ends up
            fully covering the red dot — leaving no visual hint that the
@@ -3890,106 +3905,254 @@
             padding: 0 0.3rem;
         }
         .project-modal-close:hover { color: var(--fg); }
+        /* Tab bar — switch between the project list and the create form. */
+        .project-tabs {
+            display: flex;
+            gap: 0.15rem;
+            padding: 0.35rem 0.6rem 0;
+            border-bottom: 1px solid var(--border-2);
+            background: var(--bg-2);
+            flex: none;
+        }
+        .project-tab {
+            display: flex; align-items: center; gap: 0.35rem;
+            background: transparent; border: 0; border-bottom: 2px solid transparent;
+            color: var(--fg-muted); font: inherit; font-size: 0.8rem;
+            padding: 0.45rem 0.75rem; cursor: pointer; margin-bottom: -1px;
+            transition: color 0.15s ease, border-color 0.15s ease;
+        }
+        .project-tab .codicon { font-size: 0.85rem; }
+        .project-tab:hover { color: var(--fg); }
+        .project-tab[aria-selected="true"] { color: var(--fg); border-bottom-color: #007fd4; }
+
+        /* Tab panels. The active one fills + scrolls; the other is hidden.
+           Switching plays a short directional slide + fade on the incoming
+           panel (New is to the right of Projects). */
+        .project-tab-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow-y: auto; overflow-x: hidden; }
+        .project-tab-panel[hidden] { display: none; }
+        @keyframes projPanelInRight { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+        @keyframes projPanelInLeft  { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
+        .project-tab-panel.enter-right { animation: projPanelInRight 0.18s ease; }
+        .project-tab-panel.enter-left  { animation: projPanelInLeft 0.18s ease; }
+        @media (prefers-reduced-motion: reduce) {
+            .project-tab-panel.enter-right, .project-tab-panel.enter-left { animation: none; }
+        }
+
         .project-list {
             list-style: none;
             margin: 0;
-            padding: 0.3rem 0;
-            overflow-y: auto;
-            flex: 1;
+            padding: 0.2rem 0;
         }
-        .project-row {
+        .project-list-empty {
+            padding: 1.8rem 0.9rem; text-align: center; color: var(--fg-muted); font-size: 0.82rem;
+        }
+        .project-list-empty[hidden] { display: none; }
+        .project-list-empty-cta {
+            background: transparent; border: 0; color: #4a9eda; font: inherit; font-size: 0.82rem;
+            cursor: pointer; text-decoration: underline; padding: 0 0.2rem;
+        }
+
+        /* Project rows — Unity Hub-style: a tall clickable row, secondary
+           description line, right-aligned "last edited", hover-revealed actions. */
+        .project-row { border-bottom: 1px solid var(--border-2); }
+        .project-row:last-child { border-bottom: 0; }
+        .project-row-head {
             display: flex;
             align-items: center;
             gap: 0.7rem;
-            padding: 0.45rem 0.9rem;
+            padding: 0.6rem 0.9rem;
             cursor: pointer;
         }
-        .project-row:hover { background: rgba(255,255,255,0.04); }
-        .project-row.active { background: #094771; }
-        .project-row .codicon { font-size: 1rem; color: var(--fg-muted); }
-        .project-row.active .codicon { color: #fff; }
+        .project-row-head:hover { background: rgba(255,255,255,0.05); }
+        .project-row.active .project-row-head { background: #094771; }
+        .project-row-head > .codicon { font-size: 1.15rem; color: var(--fg-muted); flex: none; }
+        .project-row.active .project-row-head > .codicon { color: #fff; }
+        .project-row-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+        .project-row-title { display: flex; align-items: center; gap: 0.4rem; }
         .project-row-name {
             color: var(--fg);
-            font-size: 0.88rem;
-            flex: 1;
+            font-size: 0.9rem;
+            font-weight: 600;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
+        .project-badge {
+            font-size: 0.6rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 0.05rem 0.35rem;
+            border-radius: 3px;
+            border: 1px solid var(--border-2);
+            color: var(--fg-muted);
+            flex: none;
+        }
+        .project-badge[hidden] { display: none; }
+        .project-badge-monogame { color: #d9a441; border-color: #6b5320; background: rgba(217,164,65,0.08); }
+        .project-badge-web { color: #4a9eda; border-color: #234a6b; background: rgba(74,158,218,0.08); }
+        .project-row-active-tag {
+            font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.04em;
+            color: #fff; opacity: 0.85; flex: none;
+        }
+        .project-row-desc {
+            color: var(--fg-muted);
+            font-size: 0.76rem;
+            line-height: 1.3;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .project-row-desc.empty { font-style: italic; opacity: 0.75; }
+        .project-row.active .project-row-desc { color: #cfe1f0; }
+        .project-row-side { flex: none; display: flex; align-items: center; }
         .project-row-meta {
             color: var(--fg-muted);
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            white-space: nowrap;
         }
+        .project-row.active .project-row-meta { color: #bcd3e6; }
         .project-row.invalid .project-row-meta { color: #f14c4c; }
+
+        /* Action buttons (rename / edit description / delete) — revealed on
+           row hover or keyboard focus, always shown on the active row. */
+        .project-row-actions {
+            display: flex; gap: 0.1rem; flex: none;
+            opacity: 0; transition: opacity 0.12s ease;
+        }
+        .project-row-head:hover .project-row-actions,
+        .project-row-actions:focus-within,
+        .project-row.active .project-row-actions { opacity: 1; }
+        .project-row-actions[hidden] { display: none; }
+        .project-action {
+            background: transparent; border: 0; color: var(--fg-muted);
+            cursor: pointer; padding: 0.25rem 0.35rem; border-radius: 3px; line-height: 1;
+        }
+        .project-action .codicon { font-size: 0.9rem; }
+        .project-action:hover { background: rgba(255,255,255,0.12); color: var(--fg); }
+        .project-action.editing { color: #4a9eda; }
+        .project-action-danger:hover { background: rgba(241,76,76,0.18); color: #f14c4c; }
+        .project-row.active .project-action { color: #cfe1f0; }
+        .project-row.active .project-action:hover { background: rgba(255,255,255,0.15); color: #fff; }
+
+        /* Kebab (⋯) menu — holds rename / edit description / delete. Portaled
+           to <body> with fixed positioning (set in JS) so it's never clipped
+           by the scrolling list or the modal's overflow. */
+        .project-row-menu-wrap { position: relative; flex: none; }
+        .project-row-menu {
+            position: fixed; z-index: 2000; min-width: 11rem;
+            background: var(--bg-1); border: 1px solid var(--border-2);
+            border-radius: 5px; box-shadow: 0 8px 22px rgba(0,0,0,0.5);
+            padding: 0.25rem; display: flex; flex-direction: column;
+        }
+        .project-row-menu[hidden] { display: none; }
+        .project-row-menu-item {
+            display: flex; align-items: center; gap: 0.5rem;
+            background: transparent; border: 0; border-radius: 3px;
+            color: var(--fg); font: inherit; font-size: 0.8rem;
+            padding: 0.35rem 0.5rem; cursor: pointer; text-align: left; width: 100%;
+        }
+        .project-row-menu-item .codicon { font-size: 0.9rem; color: var(--fg-muted); }
+        .project-row-menu-item:hover { background: rgba(255,255,255,0.08); }
+        .project-row-menu-item.danger { color: #f14c4c; }
+        .project-row-menu-item.danger .codicon { color: #f14c4c; }
+        .project-row-menu-item.danger:hover { background: rgba(241,76,76,0.15); }
+        .project-row-menu-sep { height: 1px; background: var(--border-2); margin: 0.2rem 0.1rem; }
+
+        /* Inline rename + description edit inputs (swap in over the text). */
+        .project-rename-input, .project-desc-input {
+            flex: 1; min-width: 0;
+            background: var(--bg-1); border: 1px solid #007fd4; color: var(--fg);
+            font: inherit; border-radius: 3px; outline: none;
+        }
+        .project-rename-input { font-size: 0.88rem; font-weight: 600; padding: 0.1rem 0.35rem; }
+        .project-desc-input { font-size: 0.76rem; padding: 0.08rem 0.35rem; }
+
+        /* Inline delete confirm (replaces the action row in place). */
+        .project-confirm { display: flex; align-items: center; gap: 0.4rem; flex: none; }
+        .project-confirm-msg { font-size: 0.72rem; color: var(--fg-muted); }
+        .project-confirm-yes, .project-confirm-no {
+            font: inherit; font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 3px; cursor: pointer; border: 0;
+        }
+        .project-confirm-yes { background: #a1260d; color: #fff; }
+        .project-confirm-yes:hover { background: #c22e10; }
+        .project-confirm-no { background: transparent; color: var(--fg-muted); border: 1px solid var(--border-2); }
+        .project-confirm-no:hover { color: var(--fg); }
         .project-new {
             display: flex;
             flex-direction: column;
             gap: 0.55rem;
-            padding: 0.7rem 0.9rem 0.5rem;
-            border-top: 1px solid var(--border-2);
-            background: var(--bg-2);
+            padding: 0.85rem 0.9rem;
         }
+        /* No global border-box reset in this page, so opt the form controls in
+           explicitly — otherwise width:100% + padding + border overflows and
+           forces a horizontal scrollbar. */
+        .project-new, .project-new > *,
+        .template-dd, .template-dd-current, .template-dd-option, .template-dd-options {
+            box-sizing: border-box;
+        }
+        .project-new-description { width: 100%; }
         .project-new-heading {
             font-size: 0.72rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: var(--fg-muted);
         }
-        .project-new-name-row {
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-        }
-        .project-new-name-row .codicon { color: var(--fg-muted); }
         #project-new-input {
-            flex: 1;
+            width: 100%;
             background: var(--bg-1);
             border: 1px solid var(--border-2);
             color: var(--fg);
             font: inherit;
-            font-size: 0.85rem;
-            padding: 0.25rem 0.45rem;
-            border-radius: 3px;
+            font-size: 0.9rem;
+            padding: 0.45rem 0.55rem;
+            border-radius: 4px;
             outline: none;
         }
         #project-new-input:focus { border-color: #007fd4; }
-
-        /* Type picker — two side-by-side cards. Selection is required;
-           the Create button stays disabled until one is chosen. */
-        .project-type-picker {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0.45rem;
-        }
-        .project-type-card {
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
-            text-align: left;
-            padding: 0.55rem 0.65rem;
-            border: 1px solid var(--border-2);
-            border-radius: 4px;
+        .project-new-description {
             background: var(--bg-1);
+            border: 1px solid var(--border-2);
             color: var(--fg);
-            cursor: pointer;
             font: inherit;
-        }
-        .project-type-card:hover { border-color: #007fd4; }
-        .project-type-card.selected {
-            border-color: #007fd4;
-            background: #094771;
-        }
-        .project-type-card-title {
-            display: flex;
-            align-items: center;
-            gap: 0.35rem;
             font-size: 0.82rem;
-            font-weight: 600;
+            padding: 0.3rem 0.55rem;
+            border-radius: 4px;
+            outline: none;
+            resize: vertical;
         }
-        .project-type-card-desc {
-            font-size: 0.7rem;
-            color: var(--fg-muted);
-            line-height: 1.3;
+        .project-new-description:focus { border-color: #007fd4; }
+        .project-new-label {
+            font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em;
+            color: var(--fg-muted); margin-top: 0.1rem;
         }
-        .project-type-card.selected .project-type-card-desc { color: var(--fg); }
+
+        /* Template picker — a card-shaped custom dropdown. The selected option
+           shows its icon + title + description inside the control; opening lists
+           the same cards. */
+        .template-dd { position: relative; }
+        .template-dd-current, .template-dd-option {
+            display: flex; align-items: flex-start; gap: 0.6rem; width: 100%; text-align: left;
+            background: var(--bg-1); border: 1px solid var(--border-2); color: var(--fg);
+            border-radius: 5px; padding: 0.6rem 0.7rem; font: inherit; cursor: pointer;
+        }
+        .template-dd-current:hover, .template-dd-current[aria-expanded="true"] { border-color: #007fd4; }
+        .template-dd-icon { font-size: 1.15rem; color: #4a9eda; flex: none; margin-top: 0.1rem; }
+        .template-dd-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
+        .template-dd-title { font-size: 0.9rem; font-weight: 600; }
+        .template-dd-desc { font-size: 0.72rem; color: var(--fg-muted); line-height: 1.35; }
+        /* Clamp the in-card blurb to two lines so the control keeps a constant
+           height regardless of which template is selected. */
+        .template-dd-current .template-dd-desc {
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; min-height: 2.3em;
+        }
+        .template-dd-caret { margin-left: auto; color: var(--fg-muted); font-size: 0.9rem; flex: none; align-self: center; }
+        .template-dd-options {
+            position: fixed; z-index: 2000;
+            background: var(--bg-1); border: 1px solid var(--border-2); border-radius: 6px;
+            box-shadow: 0 10px 26px rgba(0,0,0,0.5); padding: 0.25rem; display: flex; flex-direction: column; gap: 0.25rem;
+        }
+        .template-dd-options[hidden] { display: none; }
+        .template-dd-option { border-color: transparent; }
+        .template-dd-option:hover { background: rgba(255,255,255,0.06); }
+        .template-dd-option[aria-selected="true"] { background: #094771; border-color: #007fd4; }
 
         .project-new-actions {
             display: flex;
@@ -4016,18 +4179,17 @@
         #project-new-error {
             color: #f14c4c;
             font-size: 0.72rem;
-            padding: 0.1rem 0.9rem 0.5rem;
-            background: var(--bg-2);
+            padding: 0.1rem 0.9rem 0.6rem;
         }
         #project-new-error[hidden] { display: none; }
 
-        /* First-run mode: project list is hidden, the modal is bigger,
-           and the close button is suppressed so the user must pick a
-           type before the editor can render. */
-        .project-overlay.first-run .project-list,
+        /* First-run mode: the tabs + Projects panel + close button are
+           suppressed (there are no projects to pick and the user must
+           commit to a workspace before the editor can render), and the
+           modal is a touch bigger. JS forces the New-workspace panel open. */
+        .project-overlay.first-run .project-tabs,
         .project-overlay.first-run #project-overlay-close { display: none; }
         .project-overlay.first-run .project-modal { width: min(620px, 92vw); }
-        .project-overlay.first-run .project-new { border-top: 0; }
 
         /* ── Changelog overlay ───────────────────────────────────────────
            "What's new" modal driven by src/version-popup.ts. Markup is
@@ -5509,8 +5671,7 @@
                  information), project picker, View menu, GitHub status
                  icon + chips. Run/Stop/Debug/Export get pushed to the
                  right by the .grow spacer below. -->
-            <span id="project-name" class="project-name" title="Active project (fade.json) — click to switch" hidden></span>
-            <vscode-button id="open-projects" icon="folder-library" secondary="true" title="Switch / create project (⌘P)"></vscode-button>
+            <span id="project-name" class="project-name" title="Active project — click to switch (⌘P)" hidden></span>
             <div class="view-menu-wrap" id="view-menu-wrap">
                 <vscode-button id="view-menu-btn" icon="layout" secondary="true" title="View — open panels, manage layouts">View</vscode-button>
                 <div id="view-menu" class="view-menu" hidden>
@@ -6003,34 +6164,61 @@
                 <span class="grow"></span>
                 <button class="project-modal-close" id="project-overlay-close" title="Close (Esc)">&times;</button>
             </div>
-            <ul class="project-list" id="project-list"></ul>
-            <div class="project-new">
-                <div class="project-new-heading" id="project-new-heading">New workspace</div>
-                <div class="project-new-name-row">
-                    <span class="codicon codicon-add"></span>
-                    <input id="project-new-input" type="text" placeholder="Workspace name (letters, digits, dash, underscore)" autocomplete="off" spellcheck="false" />
-                </div>
-                <div class="project-type-picker" role="radiogroup" aria-label="Workspace type">
-                    <button type="button" class="project-type-card" data-type="web" role="radio" aria-checked="false">
-                        <span class="project-type-card-title">
-                            <span class="codicon codicon-globe"></span>
-                            Web
-                        </span>
-                        <span class="project-type-card-desc">Browser-only project. Runs the FadeBasic interpreter directly in the page — fastest to start, ideal for scripts, text output, and standard commands.</span>
-                    </button>
-                    <button type="button" class="project-type-card" data-type="monogame" role="radio" aria-checked="false">
-                        <span class="project-type-card-title">
-                            <span class="codicon codicon-game"></span>
-                            MonoGame
-                        </span>
-                        <span class="project-type-card-desc">Game project hosted in a MonoGame WebAssembly runtime. Unlocks sprite, sound, and input commands; loads a heavier runtime on first preview.</span>
-                    </button>
-                </div>
-                <div class="project-new-actions">
-                    <button type="button" id="project-new-create" disabled>Create workspace</button>
+            <div class="project-tabs" role="tablist">
+                <button type="button" class="project-tab" id="project-tab-projects" data-tab="projects" role="tab" aria-selected="true">
+                    <span class="codicon codicon-folder"></span> Projects
+                </button>
+                <button type="button" class="project-tab" id="project-tab-new" data-tab="new" role="tab" aria-selected="false">
+                    <span class="codicon codicon-add"></span> New project
+                </button>
+            </div>
+            <div class="project-tab-panel" id="project-panel-projects" data-tab="projects">
+                <ul class="project-list" id="project-list"></ul>
+                <div class="project-list-empty" id="project-list-empty" hidden>
+                    No projects yet.
+                    <button type="button" class="project-list-empty-cta" id="project-list-empty-cta">Create one</button>
                 </div>
             </div>
-            <div id="project-new-error" hidden></div>
+            <div class="project-tab-panel" id="project-panel-new" data-tab="new" hidden>
+                <div class="project-new">
+                    <div class="project-new-heading" id="project-new-heading">New project</div>
+                    <input id="project-new-input" type="text" placeholder="Project name (letters, digits, dash, underscore)" autocomplete="off" spellcheck="false" />
+                    <textarea id="project-new-description" class="project-new-description" rows="2" placeholder="Description" spellcheck="false"></textarea>
+                    <label class="project-new-label">Template</label>
+                    <div class="template-dd" id="project-type">
+                        <button type="button" class="template-dd-current" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="template-dd-icon codicon"></span>
+                            <span class="template-dd-text">
+                                <span class="template-dd-title"></span>
+                                <span class="template-dd-desc"></span>
+                            </span>
+                            <span class="template-dd-caret codicon codicon-chevron-down"></span>
+                        </button>
+                        <div class="template-dd-options" role="listbox" hidden>
+                            <button type="button" class="template-dd-option" role="option" data-type="monogame" data-icon="codicon-game"
+                                    data-title="Game" data-desc="A game with a graphical canvas runtime. Sprites, sound, and input; loads a heavier runtime on first preview.">
+                                <span class="template-dd-icon codicon codicon-game"></span>
+                                <span class="template-dd-text">
+                                    <span class="template-dd-title">Game</span>
+                                    <span class="template-dd-desc">A game with a graphical canvas runtime. Sprites, sound, and input; loads a heavier runtime on first preview.</span>
+                                </span>
+                            </button>
+                            <button type="button" class="template-dd-option" role="option" data-type="web" data-icon="codicon-globe"
+                                    data-title="Web" data-desc="A browser-only project. Runs the FadeBasic interpreter right in the page — fastest to start, ideal for scripts and text output.">
+                                <span class="template-dd-icon codicon codicon-globe"></span>
+                                <span class="template-dd-text">
+                                    <span class="template-dd-title">Web</span>
+                                    <span class="template-dd-desc">A browser-only project. Runs the FadeBasic interpreter right in the page — fastest to start, ideal for scripts and text output.</span>
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="project-new-actions">
+                        <button type="button" id="project-new-create" disabled>Create project</button>
+                    </div>
+                    <div id="project-new-error" hidden></div>
+                </div>
+            </div>
         </div>
     </div>
 

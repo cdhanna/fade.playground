@@ -232,6 +232,15 @@ const MONOGAME_STARTER_SOURCE = [
 // the simpler runtime and won't crash if MonoGame isn't bootstrapped.
 const DEFAULT_SOURCE = WEB_STARTER_SOURCE;
 
+// Pre-filled sample shown on the very first visit (zero workspaces). The
+// fields are editable — this just gives a new user a ready-to-run MonoGame
+// project instead of a blank form to puzzle over.
+const SAMPLE_FIRST_RUN = {
+    name: 'My Game',
+    type: 'monogame' as FadeProjectType,
+    description: 'A starter Game project — a sprite in the middle of the screen you can build on. Edit main.fbasic to make it your own.',
+};
+
 // ─── DOM refs ───────────────────────────────────────────────────────────────
 // Split launch button: `launchBtn` is the primary action (Debug or Run per the
 // selected mode; morphs to Reset/Restart while running); `launchCaretBtn` opens
@@ -377,7 +386,7 @@ class OpfsWorkspace {
     // browser-only path) or `monogame` (iframe-hosted MonoGame). The user
     // picks this in the new-project modal; falling back to `web` keeps
     // legacy callers behaving as before.
-    async createProject(name: string, type: FadeProjectType = 'web'): Promise<void> {
+    async createProject(name: string, type: FadeProjectType = 'web', description?: string): Promise<void> {
         const dir = await this.root.getDirectoryHandle(name, { create: true });
         // Avoid clobbering an existing project.
         let hasAny = false;
@@ -388,7 +397,7 @@ class OpfsWorkspace {
         const starter = type === 'monogame' ? MONOGAME_STARTER_SOURCE : WEB_STARTER_SOURCE;
         await mainW.write(starter);
         await mainW.close();
-        const proj = defaultFadeProject(name, ['main.fbasic'], type);
+        const proj = defaultFadeProject(name, ['main.fbasic'], type, description?.trim() || undefined);
         const manifestFh = await dir.getFileHandle(FADE_JSON_NAME, { create: true });
         const manifestW = await manifestFh.createWritable();
         await manifestW.write(stringifyFadeProject(proj));
@@ -609,6 +618,129 @@ class OpfsWorkspace {
             cur = await cur.getDirectoryHandle(seg);
         }
         return cur;
+    }
+
+    // ─── Project-level by-name operations (workspace picker) ──────────────
+    // These reach a project by NAME rather than acting on the active one,
+    // so the picker can preview / rename / delete / describe a workspace
+    // without switching to it. They resolve the dir via `this.root`,
+    // mirroring the by-name idiom used elsewhere.
+
+    /** Resolve a project's directory handle by name. */
+    private async projectDir(name: string, create = false): Promise<FileSystemDirectoryHandle> {
+        return this.root.getDirectoryHandle(name, { create });
+    }
+
+    /** List every file in a NAMED project (not necessarily active), with
+     *  size + last-modified time. Powers the picker's preview, file count,
+     *  and "last edited" line in one walk. Slashed paths, sorted. Returns
+     *  `[]` if the project is missing. */
+    async listProjectFiles(name: string): Promise<Array<{ path: string; size: number; modified: number }>> {
+        const out: Array<{ path: string; size: number; modified: number }> = [];
+        let dir: FileSystemDirectoryHandle;
+        try { dir = await this.projectDir(name); } catch { return out; }
+        const walk = async (d: FileSystemDirectoryHandle, prefix: string) => {
+            for await (const entry of (d as any).values() as AsyncIterable<FileSystemHandle>) {
+                const childPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+                if (entry.kind === 'file') {
+                    try {
+                        const f = await (entry as FileSystemFileHandle).getFile();
+                        out.push({ path: childPath, size: f.size, modified: f.lastModified });
+                    } catch { /* skip unreadable file */ }
+                } else if (entry.kind === 'directory') {
+                    await walk(entry as FileSystemDirectoryHandle, childPath);
+                }
+            }
+        };
+        await walk(dir, '');
+        out.sort((a, b) => a.path.localeCompare(b.path));
+        return out;
+    }
+
+    /** Read + parse a named project's fade.json. `null` if missing/invalid. */
+    async readProjectManifest(name: string): Promise<FadeProject | null> {
+        try {
+            const dir = await this.projectDir(name);
+            const fh = await dir.getFileHandle(FADE_JSON_NAME);
+            const text = await (await fh.getFile()).text();
+            const r = parseFadeProject(text);
+            return r.ok && r.project ? r.project : null;
+        } catch { return null; }
+    }
+
+    /** Overwrite a named project's fade.json. */
+    async writeProjectManifest(name: string, project: FadeProject): Promise<void> {
+        const dir = await this.projectDir(name, true);
+        const fh = await dir.getFileHandle(FADE_JSON_NAME, { create: true });
+        const w = await fh.createWritable();
+        await w.write(stringifyFadeProject(project));
+        await w.close();
+    }
+
+    /** Set (empty string clears) a project's description in its fade.json.
+     *  Throws if the project has no valid manifest to edit. */
+    async setProjectDescription(name: string, description: string): Promise<void> {
+        const proj = await this.readProjectManifest(name);
+        if (!proj) throw new Error('Project has no valid fade.json to describe.');
+        const trimmed = description.trim();
+        const next: FadeProject = { ...proj };
+        if (trimmed) next.description = trimmed; else delete next.description;
+        await this.writeProjectManifest(name, next);
+    }
+
+    /** Delete a project directory (recursive). Missing is fine. If the
+     *  active project is deleted, clears the active pointer so the next
+     *  boot recovers (init() falls back to the first remaining project, or
+     *  the first-run flow if none remain). */
+    async deleteProject(name: string): Promise<void> {
+        try {
+            await this.root.removeEntry(name, { recursive: true });
+        } catch (e) {
+            if ((e as any)?.name !== 'NotFoundError') throw e;
+        }
+        if (this.activeProject === name) localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    }
+
+    /** Rename a project folder. OPFS has no atomic dir rename, so we create
+     *  the new folder, copy every file, rewrite fade.json `name`, then
+     *  remove the old folder. Updates the active pointer if the renamed
+     *  project was active. Refuses to overwrite an existing project. */
+    async renameProject(oldName: string, newName: string): Promise<void> {
+        const target = newName.trim();
+        if (!target || target === oldName) return;
+        if (!/^[\w.-]+$/.test(target)) {
+            throw new Error('Invalid name. Letters, digits, dot, dash, underscore only.');
+        }
+        const existing = await this.listProjects();
+        if (!existing.includes(oldName)) throw new Error(`No project named "${oldName}".`);
+        if (existing.includes(target)) throw new Error(`A project named "${target}" already exists.`);
+
+        const src = await this.projectDir(oldName);
+        const dst = await this.root.getDirectoryHandle(target, { create: true });
+        const copy = async (from: FileSystemDirectoryHandle, to: FileSystemDirectoryHandle) => {
+            for await (const entry of (from as any).values() as AsyncIterable<FileSystemHandle>) {
+                if (entry.kind === 'file') {
+                    const bytes = new Uint8Array(await (await (entry as FileSystemFileHandle).getFile()).arrayBuffer());
+                    const fh = await to.getFileHandle(entry.name, { create: true });
+                    const w = await fh.createWritable();
+                    await w.write(new Blob([bytes as BlobPart]));
+                    await w.close();
+                } else if (entry.kind === 'directory') {
+                    const subTo = await to.getDirectoryHandle(entry.name, { create: true });
+                    await copy(entry as FileSystemDirectoryHandle, subTo);
+                }
+            }
+        };
+        await copy(src, dst);
+
+        // Keep the manifest's display name in sync with the folder.
+        const proj = await this.readProjectManifest(target);
+        if (proj) await this.writeProjectManifest(target, { ...proj, name: target });
+
+        try { await this.root.removeEntry(oldName, { recursive: true }); }
+        catch (e) { console.warn('[fade] renameProject: failed to remove old dir', oldName, e); }
+
+        if (this.activeProject === oldName) await this.setActiveProject(target);
     }
 }
 
@@ -1839,26 +1971,89 @@ import type {
 // the user has to commit to a workspace type before the editor mounts.
 // On submit we createProject + setActiveProject and then reload — the
 // second boot pass then takes the normal happy path.
+// Wire the custom card-shaped template dropdown (#project-type). Returns a
+// small API to read/set the selected template. Called once per flow (first-run
+// OR the bootstrap picker — never both live at once).
+function wireTemplateDropdown(onChange?: (v: FadeProjectType) => void): { get(): FadeProjectType; set(v: FadeProjectType): void; close(): void } {
+    const root = document.getElementById('project-type')!;
+    const current = root.querySelector('.template-dd-current') as HTMLButtonElement;
+    const optionsWrap = root.querySelector('.template-dd-options') as HTMLElement;
+    const options = Array.from(root.querySelectorAll<HTMLButtonElement>('.template-dd-option'));
+    const curIcon = current.querySelector('.template-dd-icon') as HTMLElement;
+    const curTitle = current.querySelector('.template-dd-title') as HTMLElement;
+    const curDesc = current.querySelector('.template-dd-desc') as HTMLElement;
+    let value: FadeProjectType = (options[0]?.dataset.type as FadeProjectType) ?? 'monogame';
+    const render = () => {
+        const opt = options.find((o) => o.dataset.type === value) ?? options[0];
+        curIcon.className = 'template-dd-icon codicon ' + (opt.dataset.icon ?? '');
+        curTitle.textContent = opt.dataset.title ?? '';
+        curDesc.textContent = opt.dataset.desc ?? '';
+        for (const o of options) o.setAttribute('aria-selected', String(o === opt));
+    };
+    // The options panel is portaled to <body> (fixed positioning) so it never
+    // adds height to the form or gets clipped by the panel's overflow.
+    let outside: ((e: MouseEvent) => void) | null = null;
+    let scroller: (() => void) | null = null;
+    const close = () => {
+        if (optionsWrap.hidden) return;
+        optionsWrap.hidden = true;
+        current.setAttribute('aria-expanded', 'false');
+        root.append(optionsWrap);
+        optionsWrap.style.cssText = '';
+        if (outside) { document.removeEventListener('mousedown', outside, true); outside = null; }
+        if (scroller) { window.removeEventListener('scroll', scroller, true); scroller = null; }
+    };
+    const open = () => {
+        const r = current.getBoundingClientRect();
+        document.body.append(optionsWrap);
+        optionsWrap.hidden = false;
+        optionsWrap.style.top = `${Math.round(r.bottom + 4)}px`;
+        optionsWrap.style.left = `${Math.round(r.left)}px`;
+        optionsWrap.style.width = `${Math.round(r.width)}px`;
+        current.setAttribute('aria-expanded', 'true');
+        outside = (e) => {
+            const t = e.target as Node;
+            if (!current.contains(t) && !optionsWrap.contains(t)) close();
+        };
+        document.addEventListener('mousedown', outside, true);
+        scroller = () => close();
+        window.addEventListener('scroll', scroller, true);
+    };
+    current.addEventListener('click', (e) => { e.stopPropagation(); if (optionsWrap.hidden) open(); else close(); });
+    for (const o of options) {
+        o.addEventListener('click', (e) => {
+            e.stopPropagation();
+            value = o.dataset.type as FadeProjectType;
+            render(); close(); onChange?.(value);
+        });
+    }
+    render();
+    return { get: () => value, set: (v) => { value = v; render(); }, close };
+}
+
 async function runFirstRunFlow(workspace: OpfsWorkspace): Promise<never> {
     const overlay = document.getElementById('project-overlay')!;
     const titleEl = document.getElementById('project-modal-title')!;
     const headingEl = document.getElementById('project-new-heading')!;
     const nameInput = document.getElementById('project-new-input') as HTMLInputElement;
+    const descInput = document.getElementById('project-new-description') as HTMLTextAreaElement;
     const errorEl = document.getElementById('project-new-error')!;
     const createBtn = document.getElementById('project-new-create') as HTMLButtonElement;
-    const cards = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.project-type-card'),
-    );
+    const panelProjects = document.getElementById('project-panel-projects')!;
+    const panelNew = document.getElementById('project-panel-new')!;
+    const template = wireTemplateDropdown();
 
     overlay.classList.add('first-run');
     overlay.hidden = false;
+    // Show the create form directly (the tabs + Projects panel are hidden in
+    // first-run via the .first-run CSS + these toggles).
+    panelProjects.hidden = true;
+    panelNew.hidden = false;
     titleEl.textContent = 'Welcome';
-    headingEl.textContent = 'Create your first workspace';
+    headingEl.textContent = 'Create your first project';
 
-    let selected: FadeProjectType | null = null;
     const updateBtn = () => {
-        createBtn.disabled =
-            nameInput.value.trim().length === 0 || selected === null;
+        createBtn.disabled = nameInput.value.trim().length === 0;
     };
     const showError = (msg: string) => {
         errorEl.textContent = msg;
@@ -1868,31 +2063,23 @@ async function runFirstRunFlow(workspace: OpfsWorkspace): Promise<never> {
         errorEl.textContent = '';
         errorEl.hidden = true;
     };
-
-    for (const card of cards) {
-        card.addEventListener('click', () => {
-            const t = card.dataset.type as FadeProjectType | undefined;
-            if (t !== 'web' && t !== 'monogame') return;
-            selected = t;
-            for (const c of cards) {
-                const match = c === card;
-                c.classList.toggle('selected', match);
-                c.setAttribute('aria-checked', match ? 'true' : 'false');
-            }
-            updateBtn();
-        });
-    }
     nameInput.addEventListener('input', () => { clearError(); updateBtn(); });
+
+    // Pre-fill a ready-to-run sample Game project (all fields editable).
+    nameInput.value = SAMPLE_FIRST_RUN.name;
+    descInput.value = SAMPLE_FIRST_RUN.description;
+    template.set(SAMPLE_FIRST_RUN.type);
+    updateBtn();
 
     const submit = async () => {
         const name = nameInput.value.trim();
-        if (!name || !selected) return;
+        if (!name) return;
         if (!/^[\w.-]+$/.test(name)) {
             showError('Invalid name. Letters, digits, dot, dash, underscore only.');
             return;
         }
         try {
-            await workspace.createProject(name, selected);
+            await workspace.createProject(name, template.get(), descInput.value);
             await workspace.setActiveProject(name);
         } catch (e: any) {
             showError('Create failed: ' + (e?.message ?? e));
@@ -8156,34 +8343,43 @@ async function bootstrap() {
     // and the × button so a brand-new user can't bypass the type pick.
     const projectOverlay = document.getElementById('project-overlay')!;
     const projectListEl = document.getElementById('project-list')!;
+    const projectListEmpty = document.getElementById('project-list-empty')!;
+    const projectListEmptyCta = document.getElementById('project-list-empty-cta')!;
     const projectOverlayCloseBtn = document.getElementById('project-overlay-close')!;
     const projectModalTitleEl = document.getElementById('project-modal-title')!;
     const projectNewHeadingEl = document.getElementById('project-new-heading')!;
     const projectNewInput = document.getElementById('project-new-input') as HTMLInputElement;
+    const projectNewDescription = document.getElementById('project-new-description') as HTMLTextAreaElement;
     const projectNewError = document.getElementById('project-new-error')!;
     const projectNewCreateBtn = document.getElementById('project-new-create') as HTMLButtonElement;
-    const projectTypeCards = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.project-type-card'),
-    );
-    const openProjectsBtn = document.getElementById('open-projects')!;
+    const projectTabProjects = document.getElementById('project-tab-projects')!;
+    const projectTabNew = document.getElementById('project-tab-new')!;
+    const projectPanelProjects = document.getElementById('project-panel-projects')!;
+    const projectPanelNew = document.getElementById('project-panel-new')!;
+    const template = wireTemplateDropdown();
 
-    let selectedProjectType: FadeProjectType | null = null;
     let firstRunMode = false;
 
-    function setSelectedProjectType(type: FadeProjectType | null) {
-        selectedProjectType = type;
-        for (const card of projectTypeCards) {
-            const match = card.dataset.type === type;
-            card.classList.toggle('selected', match);
-            card.setAttribute('aria-checked', match ? 'true' : 'false');
-        }
-        updateCreateButtonState();
+    // Toggle between the Projects (pick) and New-project (create) tabs, with a
+    // short directional slide+fade on the incoming panel.
+    function setProjectTab(tab: 'projects' | 'new') {
+        const isNew = tab === 'new';
+        projectTabProjects.setAttribute('aria-selected', String(!isNew));
+        projectTabNew.setAttribute('aria-selected', String(isNew));
+        projectPanelProjects.hidden = isNew;
+        projectPanelNew.hidden = !isNew;
+        projectModalTitleEl.textContent = isNew ? 'New project' : 'Projects';
+        const shown = isNew ? projectPanelNew : projectPanelProjects;
+        shown.classList.remove('enter-left', 'enter-right');
+        void shown.offsetWidth; // restart the animation on every switch
+        shown.classList.add(isNew ? 'enter-right' : 'enter-left');
+        if (isNew) setTimeout(() => projectNewInput.focus(), 0);
     }
 
     function updateCreateButtonState() {
-        const name = projectNewInput.value.trim();
-        projectNewCreateBtn.disabled =
-            name.length === 0 || selectedProjectType === null;
+        // A template is always selected (the dropdown defaults to Game), so
+        // the only gate is a non-empty name.
+        projectNewCreateBtn.disabled = projectNewInput.value.trim().length === 0;
     }
 
     function showProjectError(msg: string) {
@@ -8195,68 +8391,321 @@ async function bootstrap() {
         projectNewError.hidden = true;
     }
 
-    // Pull a short summary line from a project's fade.json so the list
-    // shows something useful (name + source count or an invalid marker).
-    async function summarizeProject(name: string): Promise<{ label: string; meta: string; invalid: boolean }> {
-        try {
-            const dir = await (await navigator.storage.getDirectory())
-                .getDirectoryHandle('workspace')
-                .then((w) => w.getDirectoryHandle(name));
-            let manifestText: string | null = null;
-            try {
-                const fh = await dir.getFileHandle(FADE_JSON_NAME);
-                manifestText = await (await fh.getFile()).text();
-            } catch { /* no manifest */ }
-            if (!manifestText) return { label: name, meta: 'no fade.json', invalid: true };
-            const r = parseFadeProject(manifestText);
-            if (!r.ok || !r.project) return { label: name, meta: 'fade.json invalid', invalid: true };
-            const count = r.project.sources.length;
-            const label = r.project.name && r.project.name !== name
-                ? `${r.project.name} (${name})`
-                : name;
-            return { label, meta: `${count} source${count === 1 ? '' : 's'}`, invalid: false };
-        } catch {
-            return { label: name, meta: 'unreadable', invalid: true };
+    // Rich summary for a project card — display label, description, type,
+    // file count, and last-edit time. All read BY NAME (never switches the
+    // active project), so the picker can describe every workspace at rest.
+    interface ProjectSummary {
+        label: string;
+        description: string;
+        type: FadeProjectType | null;
+        fileCount: number;
+        lastEdited: number; // epoch ms; 0 when unknown
+        invalid: boolean;
+        note: string;       // short status when invalid ('no fade.json' etc.)
+    }
+    async function summarizeProject(name: string): Promise<ProjectSummary> {
+        const files = await workspace.listProjectFiles(name);
+        const lastEdited = files.reduce((m, f) => Math.max(m, f.modified), 0);
+        const proj = await workspace.readProjectManifest(name);
+        if (!proj) {
+            const hasManifest = files.some((f) => f.path === FADE_JSON_NAME);
+            return {
+                label: name, description: '', type: null,
+                fileCount: files.length, lastEdited,
+                invalid: true, note: hasManifest ? 'fade.json invalid' : 'no fade.json',
+            };
         }
+        const label = proj.name && proj.name !== name ? `${proj.name} (${name})` : name;
+        return {
+            label, description: proj.description ?? '', type: proj.type,
+            fileCount: files.length, lastEdited, invalid: false, note: '',
+        };
+    }
+
+    function formatRelativeTime(ms: number): string {
+        if (!ms) return 'never edited';
+        const s = Math.round((Date.now() - ms) / 1000);
+        if (s < 45) return 'edited just now';
+        const m = Math.round(s / 60);
+        if (m < 60) return `edited ${m}m ago`;
+        const h = Math.round(m / 60);
+        if (h < 24) return `edited ${h}h ago`;
+        const d = Math.round(h / 24);
+        if (d < 30) return `edited ${d}d ago`;
+        return 'edited ' + new Date(ms).toLocaleDateString();
+    }
+
+    // Build a single workspace row (Unity-Hub-style) + wire its affordances:
+    // click to switch, hover-revealed actions to rename / edit description /
+    // delete. No file preview — a workspace row is name + description + when
+    // it was last edited.
+    function buildProjectCard(name: string, isActive: boolean): HTMLLIElement {
+        const li = document.createElement('li');
+        li.className = 'project-row' + (isActive ? ' active' : '');
+        li.dataset.name = name;
+
+        const head = document.createElement('div');
+        head.className = 'project-row-head';
+
+        const icon = document.createElement('span');
+        icon.className = 'codicon ' + (isActive ? 'codicon-folder-opened' : 'codicon-folder');
+        head.append(icon);
+
+        const info = document.createElement('div');
+        info.className = 'project-row-info';
+
+        const titleRow = document.createElement('div');
+        titleRow.className = 'project-row-title';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'project-row-name';
+        nameEl.textContent = name;
+        titleRow.append(nameEl);
+        const badge = document.createElement('span');
+        badge.className = 'project-badge';
+        badge.hidden = true;
+        titleRow.append(badge);
+        if (isActive) {
+            const activeTag = document.createElement('span');
+            activeTag.className = 'project-row-active-tag';
+            activeTag.textContent = 'active';
+            titleRow.append(activeTag);
+        }
+        info.append(titleRow);
+
+        const descEl = document.createElement('div');
+        descEl.className = 'project-row-desc';
+        descEl.textContent = 'Loading…';
+        info.append(descEl);
+        head.append(info);
+
+        const side = document.createElement('div');
+        side.className = 'project-row-side';
+        const metaEl = document.createElement('span');
+        metaEl.className = 'project-row-meta';
+        metaEl.textContent = '…';
+        side.append(metaEl);
+        head.append(side);
+
+        const actions = document.createElement('div');
+        actions.className = 'project-row-actions';
+        const menuWrap = document.createElement('div');
+        menuWrap.className = 'project-row-menu-wrap';
+        const kebabBtn = document.createElement('button');
+        kebabBtn.className = 'project-action';
+        kebabBtn.title = 'Project actions';
+        kebabBtn.setAttribute('aria-label', 'Project actions');
+        kebabBtn.setAttribute('aria-haspopup', 'true');
+        kebabBtn.setAttribute('aria-expanded', 'false');
+        kebabBtn.innerHTML = '<span class="codicon codicon-ellipsis"></span>';
+        const menu = document.createElement('div');
+        menu.className = 'project-row-menu';
+        menu.hidden = true;
+        const mkMenuItem = (codicon: string, label: string, danger = false) => {
+            const b = document.createElement('button');
+            b.className = 'project-row-menu-item' + (danger ? ' danger' : '');
+            const ic = document.createElement('span');
+            ic.className = 'codicon ' + codicon;
+            b.append(ic, document.createTextNode(label));
+            return b;
+        };
+        const renameItem = mkMenuItem('codicon-edit', 'Rename');
+        const descItem = mkMenuItem('codicon-note', 'Edit description');
+        const menuSep = document.createElement('div');
+        menuSep.className = 'project-row-menu-sep';
+        const deleteItem = mkMenuItem('codicon-trash', 'Delete', true);
+        menu.append(renameItem, descItem, menuSep, deleteItem);
+        menuWrap.append(kebabBtn, menu);
+        actions.append(menuWrap);
+        head.append(actions);
+        li.append(head);
+
+        // Kebab menu — portaled to <body> with fixed positioning so it's never
+        // clipped by the scrolling list or the modal's overflow:hidden.
+        let outsideHandler: ((e: MouseEvent) => void) | null = null;
+        let scrollHandler: (() => void) | null = null;
+        const closeMenu = () => {
+            if (menu.hidden) return;
+            menu.hidden = true;
+            kebabBtn.setAttribute('aria-expanded', 'false');
+            menuWrap.append(menu);        // re-own it so a re-render can't orphan it
+            menu.style.cssText = '';
+            if (outsideHandler) { document.removeEventListener('mousedown', outsideHandler, true); outsideHandler = null; }
+            if (scrollHandler) { window.removeEventListener('scroll', scrollHandler, true); scrollHandler = null; }
+        };
+        const openMenu = () => {
+            const r = kebabBtn.getBoundingClientRect();
+            document.body.append(menu);
+            menu.hidden = false;
+            menu.style.top = `${Math.round(r.bottom + 4)}px`;
+            menu.style.right = `${Math.round(window.innerWidth - r.right)}px`;
+            menu.style.left = 'auto';
+            kebabBtn.setAttribute('aria-expanded', 'true');
+            outsideHandler = (ev) => {
+                const t = ev.target as Node;
+                if (!menu.contains(t) && !kebabBtn.contains(t)) closeMenu();
+            };
+            document.addEventListener('mousedown', outsideHandler, true);
+            scrollHandler = () => closeMenu(); // stale position on scroll → dismiss
+            window.addEventListener('scroll', scrollHandler, true);
+        };
+        kebabBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (menu.hidden) openMenu(); else closeMenu();
+        });
+        renameItem.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); startRename(); });
+        descItem.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); startDescEdit(); });
+        deleteItem.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); startDelete(); });
+
+        // ── Switching (click the row body) ──
+        head.addEventListener('click', (e) => {
+            const t = e.target as HTMLElement;
+            if (t.closest('.project-row-actions') || t.closest('input')) return;
+            if (isActive) { closeProjectOverlay(); return; }
+            switchToProject(name);
+        });
+
+        // ── Populate summary (async) ──
+        let summary: ProjectSummary | null = null;
+        summarizeProject(name).then((s) => {
+            summary = s;
+            nameEl.textContent = s.label;
+            if (s.type) {
+                badge.hidden = false;
+                badge.textContent = s.type === 'monogame' ? 'Game' : 'Web';
+                badge.classList.add(s.type === 'monogame' ? 'project-badge-monogame' : 'project-badge-web');
+            }
+            descEl.textContent = s.description || 'No description';
+            descEl.classList.toggle('empty', !s.description);
+            metaEl.textContent = s.invalid ? s.note : formatRelativeTime(s.lastEdited);
+            metaEl.title = `${s.fileCount} file${s.fileCount === 1 ? '' : 's'}`;
+            if (s.invalid) li.classList.add('invalid');
+        });
+
+        // ── Rename (inline input swap on the name) ──
+        function startRename() {
+            if (titleRow.querySelector('.project-rename-input')) return;
+            const input = document.createElement('input');
+            input.className = 'project-rename-input';
+            input.value = name;
+            input.spellcheck = false;
+            nameEl.style.display = 'none';
+            titleRow.prepend(input);
+            input.focus();
+            input.select();
+            let done = false;
+            const cancel = () => { if (done) return; done = true; input.remove(); nameEl.style.display = ''; };
+            const commit = async () => {
+                if (done) return;
+                const next = input.value.trim();
+                if (!next || next === name) { cancel(); return; }
+                done = true;
+                try {
+                    await workspace.renameProject(name, next);
+                } catch (err: any) {
+                    done = false;
+                    showProjectError('Rename failed: ' + (err?.message ?? err));
+                    input.focus();
+                    return;
+                }
+                if (isActive) { location.reload(); return; }
+                await renderProjectList();
+            };
+            input.addEventListener('keydown', (ev) => {
+                ev.stopPropagation();
+                if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+                else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+            });
+            input.addEventListener('blur', () => cancel());
+        }
+
+        // ── Edit description (inline input swap on the description line) ──
+        function startDescEdit() {
+            if (info.querySelector('.project-desc-input')) return;
+            if (summary?.invalid) { showProjectError('This project has no valid fade.json to describe.'); return; }
+            const input = document.createElement('input');
+            input.className = 'project-desc-input';
+            input.value = summary?.description ?? '';
+            input.placeholder = 'Describe this project…';
+            input.spellcheck = false;
+            descEl.style.display = 'none';
+            descEl.after(input);
+            input.focus();
+            input.select();
+            let done = false;
+            const cancel = () => { if (done) return; done = true; input.remove(); descEl.style.display = ''; };
+            const commit = async () => {
+                if (done) return;
+                const next = input.value.trim();
+                done = true;
+                try {
+                    await workspace.setProjectDescription(name, next);
+                } catch (err: any) {
+                    done = false;
+                    showProjectError('Could not save description: ' + (err?.message ?? err));
+                    input.focus();
+                    return;
+                }
+                if (summary) summary.description = next;
+                descEl.textContent = next || 'No description';
+                descEl.classList.toggle('empty', !next);
+                input.remove();
+                descEl.style.display = '';
+            };
+            input.addEventListener('keydown', (ev) => {
+                ev.stopPropagation();
+                if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+                else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+            });
+            input.addEventListener('blur', () => commit()); // save on blur
+        }
+
+        // ── Delete (inline two-step confirm) ──
+        function startDelete() {
+            if (head.querySelector('.project-confirm')) return;
+            const confirm = document.createElement('div');
+            confirm.className = 'project-confirm';
+            const msg = document.createElement('span');
+            msg.className = 'project-confirm-msg';
+            msg.textContent = 'Delete this project?';
+            const yes = document.createElement('button');
+            yes.className = 'project-confirm-yes';
+            yes.textContent = 'Delete';
+            const no = document.createElement('button');
+            no.className = 'project-confirm-no';
+            no.textContent = 'Cancel';
+            confirm.append(msg, yes, no);
+            actions.hidden = true;
+            head.append(confirm);
+            const dismiss = () => { confirm.remove(); actions.hidden = false; };
+            no.addEventListener('click', (ev) => { ev.stopPropagation(); dismiss(); });
+            confirm.addEventListener('click', (ev) => ev.stopPropagation());
+            yes.addEventListener('click', async (ev) => {
+                ev.stopPropagation();
+                try {
+                    await workspace.deleteProject(name);
+                } catch (err: any) {
+                    showProjectError('Delete failed: ' + (err?.message ?? err));
+                    dismiss();
+                    return;
+                }
+                if (isActive) { location.reload(); return; }
+                await renderProjectList();
+            });
+        }
+
+        return li;
     }
 
     async function renderProjectList() {
         projectListEl.innerHTML = '';
         const projects = await workspace.listProjects();
         const active = workspace.currentProject();
-        for (const name of projects) {
-            const li = document.createElement('li');
-            li.className = 'project-row' + (name === active ? ' active' : '');
-            li.dataset.name = name;
-
-            const icon = document.createElement('span');
-            icon.className = 'codicon ' + (name === active ? 'codicon-folder-opened' : 'codicon-folder');
-            li.append(icon);
-
-            const label = document.createElement('span');
-            label.className = 'project-row-name';
-            label.textContent = name;
-            li.append(label);
-
-            const meta = document.createElement('span');
-            meta.className = 'project-row-meta';
-            meta.textContent = name === active ? 'active' : '…';
-            li.append(meta);
-
-            li.onclick = () => {
-                if (name === active) { closeProjectOverlay(); return; }
-                switchToProject(name);
-            };
-            projectListEl.append(li);
-
-            // Resolve the meta line lazily so the list renders fast even
-            // with many projects.
-            summarizeProject(name).then((s) => {
-                if (name !== active) meta.textContent = s.meta;
-                if (s.invalid) li.classList.add('invalid');
-                label.textContent = s.label;
-            });
+        // Hide internal live-session sandboxes from the picker.
+        const visible = projects.filter((n) => !isLiveSessionProjectName(n));
+        for (const name of visible) {
+            projectListEl.append(buildProjectCard(name, name === active));
         }
+        projectListEmpty.hidden = visible.length > 0;
     }
 
     async function switchToProject(name: string) {
@@ -8271,13 +8720,9 @@ async function bootstrap() {
         location.reload();
     }
 
-    async function createNewProject(rawName: string, type: FadeProjectType | null) {
+    async function createNewProject(rawName: string, type: FadeProjectType) {
         const name = rawName.trim();
         if (!name) return;
-        if (!type) {
-            showProjectError('Pick a workspace type before creating.');
-            return;
-        }
         if (!/^[\w.-]+$/.test(name)) {
             showProjectError('Invalid name. Letters, digits, dot, dash, underscore only.');
             return;
@@ -8288,7 +8733,7 @@ async function bootstrap() {
             return;
         }
         try {
-            await workspace.createProject(name, type);
+            await workspace.createProject(name, type, projectNewDescription.value);
         } catch (e: any) {
             showProjectError('Create failed: ' + (e?.message ?? e));
             return;
@@ -8297,46 +8742,38 @@ async function bootstrap() {
         await switchToProject(name);
     }
 
-    function openProjectOverlay(opts: { firstRun?: boolean } = {}) {
-        firstRunMode = !!opts.firstRun;
-        projectOverlay.classList.toggle('first-run', firstRunMode);
-        projectModalTitleEl.textContent = firstRunMode ? 'Welcome' : 'Projects';
-        projectNewHeadingEl.textContent = firstRunMode
-            ? 'Create your first workspace'
-            : 'New workspace';
+    function openProjectOverlay() {
+        // The switcher always opens on the Projects tab; the create form lives
+        // behind the "New project" tab. (First-run uses runFirstRunFlow.)
+        firstRunMode = false;
+        projectOverlay.classList.remove('first-run');
+        projectNewHeadingEl.textContent = 'New project';
         clearProjectError();
         projectNewInput.value = '';
-        setSelectedProjectType(null);
+        projectNewDescription.value = '';
+        template.set('monogame'); // default to Game
+        updateCreateButtonState();
         projectOverlay.hidden = false;
-        if (!firstRunMode) {
-            renderProjectList().catch((e) =>
-                console.error('[fade] project list render failed', e),
-            );
-        } else {
-            projectListEl.innerHTML = '';
-        }
-        // Focus the new-project input on a microtask so screen readers + the
-        // browser's focus ring land correctly after the show animation.
-        setTimeout(() => projectNewInput.focus(), 0);
+        setProjectTab('projects');
+        renderProjectList().catch((e) =>
+            console.error('[fade] project list render failed', e),
+        );
     }
     function closeProjectOverlay() {
         // First-run mode is required: the editor below is unmounted/blank
         // until a project exists, so we refuse to close.
         if (firstRunMode) return;
+        template.close(); // dismiss the portaled template dropdown if open
         projectOverlay.hidden = true;
     }
 
-    for (const card of projectTypeCards) {
-        card.addEventListener('click', () => {
-            const t = card.dataset.type as FadeProjectType | undefined;
-            if (t === 'web' || t === 'monogame') setSelectedProjectType(t);
-        });
-    }
     projectNewCreateBtn.addEventListener('click', () => {
-        createNewProject(projectNewInput.value, selectedProjectType);
+        createNewProject(projectNewInput.value, template.get());
     });
+    projectTabProjects.addEventListener('click', () => setProjectTab('projects'));
+    projectTabNew.addEventListener('click', () => setProjectTab('new'));
+    projectListEmptyCta.addEventListener('click', () => setProjectTab('new'));
 
-    openProjectsBtn.addEventListener('click', () => openProjectOverlay());
     projectNameEl.addEventListener('click', () => openProjectOverlay());
     projectOverlayCloseBtn.addEventListener('click', closeProjectOverlay);
     projectOverlay.addEventListener('click', (e) => {
@@ -8384,10 +8821,9 @@ async function bootstrap() {
     projectNewInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
-            // Enter is a shortcut for clicking Create — same gating, so
-            // it's a no-op until a type has been picked.
+            // Enter is a shortcut for clicking Create — gated on a name.
             if (!projectNewCreateBtn.disabled) {
-                createNewProject(projectNewInput.value, selectedProjectType);
+                createNewProject(projectNewInput.value, template.get());
             }
         }
         if (e.key === 'Escape') {
@@ -8416,6 +8852,10 @@ async function bootstrap() {
         // The rest (font, minimap, tabs, wrap, …) come from settings —
         // applySettingsToEditor below seeds them and re-applies on change.
         ...editorOptionsFromSettings(currentSettings()),
+        // A click anywhere in the gutter — glyph margin OR line numbers —
+        // toggles a breakpoint (see the onMouseDown handler), so don't also
+        // select the whole line when the line number is clicked.
+        selectOnLineNumbers: false,
     } as monaco.editor.IStandaloneEditorConstructionOptions);
 
     // Reactively re-apply editor settings whenever they change (user toggles
@@ -10293,6 +10733,23 @@ async function bootstrap() {
     // attached to the old model. Track the owner so we can clear it
     // explicitly instead of leaving a ghost arrow in the previous file.
     let currentLineModel: monaco.editor.ITextModel | null = null;
+    // View-zone id for the "past the end" current-line marker (see setCurrentLine).
+    let currentEndZoneId: string | null = null;
+    function clearCurrentEndZone() {
+        if (currentEndZoneId == null || !editor) return;
+        const id = currentEndZoneId;
+        editor.changeViewZones((acc) => acc.removeZone(id));
+        currentEndZoneId = null;
+    }
+    // A blank or comment line is never a real step target (comments/blank lines
+    // carry no bytecode), so a debugger stop that lands on one — or past the last
+    // line — is the program's synthetic end stop. Used to render the "end of
+    // program" marker instead of a normal (mid-file / clamped) current-line one.
+    function isNonCodeLine(model: monaco.editor.ITextModel, line: number): boolean {
+        if (line > model.getLineCount()) return true;
+        const text = model.getLineContent(line).trim();
+        return text === '' || text.startsWith('`') || /^rem(start|end)?\b/i.test(text);
+    }
 
     function setDebugButtons() {
         const hasSession = debugSessionActive;
@@ -10381,6 +10838,7 @@ async function bootstrap() {
     }
 
     function setCurrentLine(line: number | null) {
+        clearCurrentEndZone();
         if (line == null) {
             if (currentLineModel) {
                 currentLineModel.deltaDecorations(currentLineDecorations, []);
@@ -10397,6 +10855,23 @@ async function bootstrap() {
         if (currentLineModel && currentLineModel !== model) {
             currentLineModel.deltaDecorations(currentLineDecorations, []);
             currentLineDecorations = [];
+        }
+        // The program's final steppable stop (the compiler's trailing NOOP) lands
+        // just past the last statement — which can be past the last model line, or
+        // on a trailing blank/comment line. Either way it's not a real code stop
+        // (comments/blank lines carry no bytecode), so render it as an "end of
+        // program" marker on a virtual line past the code rather than a clamped or
+        // mid-file highlight.
+        if (isNonCodeLine(model, line) && editor) {
+            currentLineDecorations = model.deltaDecorations(currentLineDecorations, []);
+            currentLineModel = model;
+            editor.changeViewZones((acc) => {
+                const dom = document.createElement('div');
+                dom.className = 'fade-current-endzone';
+                currentEndZoneId = acc.addZone({ afterLineNumber: model.getLineCount(), heightInLines: 1, domNode: dom });
+            });
+            try { editor.revealLineInCenterIfOutsideViewport(model.getLineCount(), monaco.editor.ScrollType.Smooth); } catch { /* not ready */ }
+            return;
         }
         currentLineDecorations = model.deltaDecorations(currentLineDecorations, [{
             range: new monaco.Range(line, 1, line, 1),
@@ -10488,7 +10963,11 @@ async function bootstrap() {
     }
 
     editor.onMouseDown((e) => {
-        if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
+        // Toggle on a click anywhere in the gutter — the glyph-margin strip AND
+        // the line numbers — so you don't have to hit the narrow margin.
+        const tt = e.target.type;
+        if (tt !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
+            tt !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) return;
         const line = e.target.position?.lineNumber;
         if (line == null) return;
         const model = editor!.getModel();
@@ -10599,7 +11078,11 @@ async function bootstrap() {
     }
 
     editor.onMouseMove((e) => {
-        if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+        // Preview affordance over the whole gutter (glyph margin + line numbers),
+        // matching where a click will actually toggle a breakpoint.
+        const tt = e.target.type;
+        if (tt !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
+            tt !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
             clearBreakpointPreview();
             return;
         }

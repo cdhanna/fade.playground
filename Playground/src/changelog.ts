@@ -34,6 +34,14 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
         {
+            version: '0.7.1',
+            date: '2026-07-19',
+            changed: [
+                'Project view redesigned',
+                'Clicking on line number triggers breakpoint'
+            ]
+        },
+        {
             version: '0.7.0',
             date: '2026-07-17',
             added: [

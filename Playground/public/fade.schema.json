@@ -16,6 +16,10 @@
             "type": "string",
             "description": "Optional author / owner string."
         },
+        "description": {
+            "type": "string",
+            "description": "Optional free-text project description shown in the workspace picker."
+        },
         "type": {
             "type": "string",
             "description": "Project flavor. 'web' runs in the WebRuntime worker (console-style commands). 'monogame' runs in the WebRuntime.MonoGame canvas runtime (KNI-backed graphics).",

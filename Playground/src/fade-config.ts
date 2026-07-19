@@ -18,6 +18,8 @@ export interface CommandDllEntry {
 export interface FadeProject {
     name: string;
     author?: string;
+    /** Free-text project description shown in the workspace picker. */
+    description?: string;
     type: FadeProjectType;
     commandDlls?: CommandDllEntry[];
     sources: string[];
@@ -67,7 +69,7 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
     // Reject unknown keys so typos surface instead of being silently dropped.
     // `$schema` is permitted (and emitted by stringifyFadeProject) so editors
     // can attach the JSON Schema for inline validation.
-    const known = new Set(['$schema', 'name', 'author', 'type', 'commandDlls', 'sources']);
+    const known = new Set(['$schema', 'name', 'author', 'description', 'type', 'commandDlls', 'sources']);
     for (const k of Object.keys(root)) {
         if (!known.has(k)) warn(k, `Unknown property "${k}".`);
     }
@@ -80,6 +82,11 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
     // author (optional string)
     if (root.author !== undefined && typeof root.author !== 'string') {
         err('author', 'Property "author" must be a string.');
+    }
+
+    // description (optional string)
+    if (root.description !== undefined && typeof root.description !== 'string') {
+        err('description', 'Property "description" must be a string.');
     }
 
     // type (required, enum)
@@ -133,6 +140,7 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
         project: {
             name: root.name as string,
             author: typeof root.author === 'string' ? root.author : undefined,
+            description: typeof root.description === 'string' ? root.description : undefined,
             type: root.type as FadeProjectType,
             commandDlls: Array.isArray(root.commandDlls)
                 ? (root.commandDlls as CommandDllEntry[])
@@ -165,9 +173,11 @@ export function defaultFadeProject(
     projectName: string,
     sources: string[],
     type: FadeProjectType = 'web',
+    description?: string,
 ): FadeProject {
     return {
         name: projectName,
+        ...(description ? { description } : {}),
         type,
         commandDlls: [],
         sources: sources.length > 0 ? sources : ['main.fbasic'],
@@ -356,6 +366,7 @@ export function stringifyFadeProject(p: FadeProject): string {
         name: p.name,
     };
     if (p.author) ordered.author = p.author;
+    if (p.description) ordered.description = p.description;
     ordered.type = p.type;
     ordered.commandDlls = p.commandDlls ?? [];
     ordered.sources = p.sources;
