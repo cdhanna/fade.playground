@@ -1,4 +1,4 @@
 {
   "_comment": "SINGLE PIN: the Fade.MonoGame release consumed in 'package' runtime mode. The core-Fade version — and therefore the Web runtime (FadeBasic.Export.Web/.Lib.Web) — is DERIVED from this nupkg's FadeBasic.Lang.Core dependency (see runtime-assets/scripts/stage.mjs resolveCoreFadeVersion), so web + monogame never drift onto different core VMs. Bump this one value to move both runtimes in lockstep. Overrides: FADE_MONOGAME_VERSION, FADE_EXPORT_MONOGAME_VERSION, FADE_EXPORT_WEB_VERSION, FADE_LIB_WEB_VERSION; FADE_NUGET_FEED for a private feed.",
-  "monogame": "0.0.5.1"
+  "monogame": "0.0.6.1"
 }

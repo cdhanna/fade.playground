@@ -33,84 +33,97 @@ export const CHANGELOG: ChangelogEntry[] = [
     //         'Initial Release! ',
     //     ],
     // },
-        {
-            version: '0.7.1',
-            date: '2026-07-19',
-            changed: [
-                'Project view redesigned',
-                'Clicking on line number triggers breakpoint'
-            ]
-        },
-        {
-            version: '0.7.0',
-            date: '2026-07-17',
-            added: [
-                'Support for hot reload while running game'
-            ],
-            changed: [
-                'Help docs show language keywords on search',
-                'Run and Debug buttons are combined into a dropdown'
-            ]
-        },
-        {
-            version: '0.6.0',
-            date: '2026-07-02',
-            added: [
-                'Right clicking file shows `copy path` and `copy filename` buttons',
-            ],
-            fixed: [
-                'Renaming files uses inline text box, instead of popup.',
-                'Deleting file confirmation uses popup instead of browser alert'
-            ],
-            changed: [
-                
-            ],
-            notes: [
-                'Internal refactor of components. '
-            ]
-        },
-        {
-            version: '0.5.0',
-            date: '2026-07-02',
-            added: [
-                'Changelog tab in help section.'
-            ],
-            changed: [
-                'Debug Console and Output tabs have been combined.',
-                'Changelog popup only shows most recent changes. '
-            ],
-        },
-        {
-            version: '0.4.2',
-            date: '2026-06-25',
-            added: [
-                'Commands and syntax have help.',
-                'abs() and sign() commands.',
-            ],
-            fixed: [
-                'Type ahead fixes.',
-                'Performance improvements.'
-            ],
-            changed: [
-                'Debug UI uses delta compression for better performance.',
-                'AI Chat uses local GhostBot download.'
-            ]
-        },
-        {
-            version: '0.4.1',
-            date: '2026-06-10',
-            changed: [
-                'Local AI improvements.'
-            ],
-            added: [
-                'Manual SDP mode for Live Collab.'
-            ],
-            fixed: [
-                'Cannot freeze browser after fatal vm exception.',
-                'Live Collab shows game starts faster.'
-            ],
-        },
-        {
+    {
+        version: '0.8.0',
+        date: '2026-07-21',
+        changed: [
+            'Editor remembers scroll position on file',
+            'Upgraded to Fade.Mono 0.0.6.1 and Fade 0.2.5.1'
+        ],
+        fixed: [
+            'Transient asset loading error',
+            'Source maps work with multiple files',
+            'Ctrl+Clicking on symbols takes view to definition'
+        ]
+    },
+    {
+        version: '0.7.1',
+        date: '2026-07-19',
+        changed: [
+            'Project view redesigned',
+            'Clicking on line number triggers breakpoint'
+        ]
+    },
+    {
+        version: '0.7.0',
+        date: '2026-07-17',
+        added: [
+            'Support for hot reload while running game'
+        ],
+        changed: [
+            'Help docs show language keywords on search',
+            'Run and Debug buttons are combined into a dropdown'
+        ]
+    },
+    {
+        version: '0.6.0',
+        date: '2026-07-02',
+        added: [
+            'Right clicking file shows `copy path` and `copy filename` buttons',
+        ],
+        fixed: [
+            'Renaming files uses inline text box, instead of popup.',
+            'Deleting file confirmation uses popup instead of browser alert'
+        ],
+        changed: [
+
+        ],
+        notes: [
+            'Internal refactor of components. '
+        ]
+    },
+    {
+        version: '0.5.0',
+        date: '2026-07-02',
+        added: [
+            'Changelog tab in help section.'
+        ],
+        changed: [
+            'Debug Console and Output tabs have been combined.',
+            'Changelog popup only shows most recent changes. '
+        ],
+    },
+    {
+        version: '0.4.2',
+        date: '2026-06-25',
+        added: [
+            'Commands and syntax have help.',
+            'abs() and sign() commands.',
+        ],
+        fixed: [
+            'Type ahead fixes.',
+            'Performance improvements.'
+        ],
+        changed: [
+            'Debug UI uses delta compression for better performance.',
+            'AI Chat uses local GhostBot download.'
+        ]
+    },
+    {
+        version: '0.4.1',
+        date: '2026-06-10',
+        changed: [
+            'Local AI improvements.'
+        ],
+        added: [
+            'Manual SDP mode for Live Collab.'
+        ],
+        fixed: [
+            'Cannot freeze browser after fatal vm exception.',
+            'Live Collab shows game starts faster.'
+        ],
+    },
+    {
         version: '0.4.0',
         date: '2026-06-03',
         added: [
@@ -134,7 +147,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             'Live collaboration works when workspace already exists.',
         ],
     },
-     {
+    {
         version: '0.3.0',
         date: '2026-05-31',
         added: [
@@ -181,10 +194,10 @@ export const PLAYGROUND_VERSION = CHANGELOG[0].version;
 // a const tuple so the renderer can iterate without hard-coding the
 // sequence in two places.
 export const CHANGELOG_CATEGORIES = [
-    { key: 'notes',   label: 'Notes' },
-    { key: 'added',   label: 'Added' },
+    { key: 'notes', label: 'Notes' },
+    { key: 'added', label: 'Added' },
     { key: 'changed', label: 'Changed' },
-    { key: 'fixed',   label: 'Fixed' },
+    { key: 'fixed', label: 'Fixed' },
     { key: 'removed', label: 'Removed' },
 ] as const satisfies ReadonlyArray<{
     key: keyof Omit<ChangelogEntry, 'version' | 'date'>;

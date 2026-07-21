@@ -125,6 +125,11 @@ const EMPTY_CONTENT_PLAN: MonoGameContentPlan = {
     entries: [],
 };
 import { mountHelpPanel, extractCommandNameFromHover } from './help';
+import { resolveCtrlClickAction } from './ctrl-click';
+import { AssetSyncCache, isAssetNotRegisteredError } from './asset-sync-cache';
+import type { PendingAsset } from './asset-sync-cache';
+import { joinedBreakpointLines } from './breakpoint-sync';
+import type { FileBreakpoints } from './breakpoint-sync';
 import { monoGameHost, parseDebugUiEnvelope } from './monogame-host';
 import { mountSharedCursors, type SharedCursorHandle } from './shared-cursor';
 import { createLocalDebugAdapter } from './debug/local-adapter';
@@ -236,9 +241,9 @@ const DEFAULT_SOURCE = WEB_STARTER_SOURCE;
 // fields are editable — this just gives a new user a ready-to-run MonoGame
 // project instead of a blank form to puzzle over.
 const SAMPLE_FIRST_RUN = {
-    name: 'My Game',
+    name: 'FirstGame',
     type: 'monogame' as FadeProjectType,
-    description: 'A starter Game project — a sprite in the middle of the screen you can build on. Edit main.fbasic to make it your own.',
+    description: 'Your first Fade Game project',
 };
 
 // ─── DOM refs ───────────────────────────────────────────────────────────────
@@ -753,6 +758,10 @@ interface Tab {
     /** Disposable for the sharing gutter decorator. Cleared when the tab is
      *  closed; safely no-op if sharing wasn't ready when the tab opened. */
     gutterHandle?: GutterHandle;
+    /** Monaco view state (scroll position + cursor + folding) captured when
+     *  the user switches AWAY from this file, and restored when they switch
+     *  back — otherwise setModel resets every re-opened file to the top. */
+    viewState?: monaco.editor.ICodeEditorViewState | null;
 }
 
 // ── Live-session transient project helpers ───────────────────────────────
@@ -1038,7 +1047,19 @@ async function openFile(workspace: OpfsWorkspace, name: string) {
     }
     setActiveName(name);
     if (editor) {
+        // Preserve scroll/cursor across file switches. Save the outgoing
+        // file's view state before swapping models, then restore the
+        // incoming file's saved state after. Matching by model instance
+        // (rather than activeName) keeps this correct regardless of the
+        // setActiveName call above.
+        const outgoing = editor.getModel();
+        const switching = outgoing !== tab.model;
+        if (switching && outgoing) {
+            const prevTab = [...tabs.values()].find((t) => t.model === outgoing);
+            if (prevTab) prevTab.viewState = editor.saveViewState();
+        }
         editor.setModel(tab.model);
+        if (switching && tab.viewState) editor.restoreViewState(tab.viewState);
         // Ensure the Editor dockview tab itself is active — otherwise
         // `editor.focus()` is a no-op (Monaco can't take focus while
         // the panel containing it is hidden behind another tab).
@@ -1079,7 +1100,12 @@ function closeTab(name: string) {
         const next = tabs.keys().next().value;
         if (next) {
             setActiveName(next);
-            if (editor) editor.setModel(tabs.get(next)!.model);
+            const nextTab = tabs.get(next)!;
+            if (editor) {
+                editor.setModel(nextTab.model);
+                // Restore the surfaced tab's scroll/cursor if we have it.
+                if (nextTab.viewState) editor.restoreViewState(nextTab.viewState);
+            }
         } else {
             setActiveName(null);
             if (editor) editor.setModel(null);
@@ -9101,9 +9127,12 @@ async function bootstrap() {
     // any asset bytes touches nothing on the iframe side — no decode,
     // no postMessage, no GPU upload. Wiped if the user calls
     // forceAssetCacheClear() or switches projects (page reload).
-    type SyncedAssetKind = 'image' | 'audio' | 'font' | 'shader' | 'xnb';
-    interface SyncedAssetState { kind: SyncedAssetKind; hash: string; }
-    const lastSyncedAssets = new Map<string, SyncedAssetState>();
+    // Diff-based sync state lives in AssetSyncCache (see asset-sync-cache.ts).
+    // invalidate() is called whenever the runtime's content manager is torn
+    // down (fatal tick error / watchdog rebuild / observed "not registered"),
+    // so the next Run re-registers everything instead of skipping against a
+    // stale belief — the fix for the intermittent "Registered: []" failure.
+    const assetSyncCache = new AssetSyncCache();
 
     async function syncAssetsToRuntime(
         plan: MonoGameContentPlan = EMPTY_CONTENT_PLAN,
@@ -9151,15 +9180,9 @@ async function bootstrap() {
 
         // Build the target asset set first — collect bytes + a content
         // hash for every asset that should be loaded after this sync.
-        // Then diff against lastSyncedAssets and only push the changes.
+        // Then diff against assetSyncCache and only push the changes.
         // This makes repeat Runs essentially free for unchanged audio
         // (no `decodeAudioData`) and textures (no GPU re-upload).
-        interface PendingAsset {
-            name: string;
-            kind: SyncedAssetKind;
-            hash: string;
-            bytes: Uint8Array;
-        }
         const target = new Map<string, PendingAsset>();
 
         // Phase 1a: images — compile via the OPFS-backed cache then
@@ -9277,29 +9300,12 @@ async function bootstrap() {
         // re-register (hash changed), unregister (no longer present).
         // Audio routes through unregisterAudio + registerAudio; the
         // other kinds share the unregisterAsset / registerAsset path.
-        const toUnregister: SyncedAssetState[] = [];
-        const toRegister: PendingAsset[] = [];
-        let skipped = 0;
+        // assetSyncCache.invalidate() (see onGameError / onStderr) resets
+        // the baseline when the runtime rebuilt its content manager, so a
+        // fresh runtime re-registers everything instead of skipping.
+        const { toUnregister, toRegister, skipped } = assetSyncCache.diff(target);
 
-        for (const [name, last] of lastSyncedAssets) {
-            const next = target.get(name);
-            if (!next) {
-                toUnregister.push({ kind: last.kind, hash: last.hash });
-                // recorded with name in the iteration above
-                (toUnregister[toUnregister.length - 1] as any).name = name;
-            } else if (next.hash !== last.hash) {
-                toUnregister.push({ kind: last.kind, hash: last.hash });
-                (toUnregister[toUnregister.length - 1] as any).name = name;
-                toRegister.push(next);
-            } else {
-                skipped++;
-            }
-        }
-        for (const [name, next] of target) {
-            if (!lastSyncedAssets.has(name)) toRegister.push(next);
-        }
-
-        for (const old of toUnregister as Array<SyncedAssetState & { name: string }>) {
+        for (const old of toUnregister) {
             if (old.kind === 'audio') await monoGameHost.unregisterAudio(old.name);
             else await monoGameHost.unregisterAsset(old.name);
         }
@@ -9332,11 +9338,8 @@ async function bootstrap() {
             assetLog.info(`${skipped} asset${skipped === 1 ? '' : 's'} unchanged — kept from previous Run`);
         }
 
-        // Commit the new state.
-        lastSyncedAssets.clear();
-        for (const [name, p] of target) {
-            lastSyncedAssets.set(name, { kind: p.kind, hash: p.hash });
-        }
+        // Commit the new state as the baseline for the next diff.
+        assetSyncCache.commit(target);
 
         // Shared cache GC — runs once all compile passes have populated
         // liveSourcePaths so neither kind's entries get wrongly evicted.
@@ -10936,19 +10939,50 @@ async function bootstrap() {
     }
 
     function syncBreakpointsToWorker() {
-        const model = editor?.getModel();
-        if (!model) return;
-        const uri = model.uri.toString();
-        // Union of local + remote (live-session) breakpoints. The host's
-        // runtime needs to know about both so an observer-set breakpoint
-        // actually pauses execution. Without this, remote glyphs show up
-        // in the gutter but execution sails right past them.
-        const local = breakpointsByUri.get(uri) ?? new Set<number>();
-        const remote = remoteBreakpointsByUri.get(uri) ?? new Map<number, number>();
-        const allLines = new Set<number>([...local, ...remote.keys()]);
-        // Monaco lines are 1-based; the lexer/token lineNumber the bridge
-        // expects is 0-based. Drop one.
-        const payload: BreakpointRequest[] = [...allLines].map((ln) => ({ line: ln - 1, column: 0 }));
+        // Gather local + remote (live-session) breakpoints. Both matter:
+        // an observer-set remote breakpoint must reach the host runtime or
+        // execution sails right past it.
+        //
+        // Crucially, the debugger runs the whole JOINED project document,
+        // so breakpoints from EVERY project file must be sent — not just
+        // the active editor model — and each per-file Monaco line (1-based)
+        // must be translated into the joined 0-based line the compiled
+        // program uses. Skipping that translation is what made breakpoints
+        // in the 2nd/3rd file fire on the wrong line (offset by the earlier
+        // files' length) or never fire. joinedBreakpointLines does the
+        // per-file → joined mapping via projectSourceMap.toProject.
+        const uris = new Set<string>([
+            ...breakpointsByUri.keys(),
+            ...remoteBreakpointsByUri.keys(),
+        ]);
+        const files: FileBreakpoints[] = [];
+        for (const uri of uris) {
+            const name = projectFileNameFromUri(uri);
+            // With a project source map, only send breakpoints that live in
+            // a project source — orphan files aren't part of the compiled
+            // program, and passing their raw lines through would inject
+            // spurious joined-line breakpoints. Without a map (single-file),
+            // only the active model's file is the program, so restrict to it.
+            if (projectSourceMap) {
+                if (!name) continue;
+            } else if (uri !== editor?.getModel()?.uri.toString()) {
+                continue;
+            }
+            const local = breakpointsByUri.get(uri);
+            const remote = remoteBreakpointsByUri.get(uri);
+            const lines = new Set<number>();
+            if (local) for (const ln of local) lines.add(ln);
+            if (remote) for (const ln of remote.keys()) lines.add(ln);
+            if (lines.size === 0) continue;
+            // name is null only in the no-map single-file case; use the raw
+            // file name for the passthrough mapper below (it returns null →
+            // fallback to the 0-based line).
+            files.push({ name: name ?? uri, lines: [...lines] });
+        }
+        const toJoined = (fileName: string, zeroBasedLine: number): number | null =>
+            projectSourceMap ? projectSourceMap.toProject(fileName, zeroBasedLine, 0)?.line ?? null : null;
+        const payload: BreakpointRequest[] = joinedBreakpointLines(files, toJoined)
+            .map((line) => ({ line, column: 0 }));
         void dbg.setBreakpoints(payload);
     }
 
@@ -11652,6 +11686,11 @@ async function bootstrap() {
         // Iframe rAF is already dead (tickHalted); clear our pause state too.
         mgTickPaused = false;
         updateGameStatus('stopped');
+        // A fatal tick error nulls the runtime's Game1; the next Run
+        // rebuilds it with an EMPTY BrowserContentManager. Drop the sync
+        // baseline so that Run re-registers every asset instead of skipping
+        // against a stale belief (the "Registered: []" bug).
+        assetSyncCache.invalidate();
     };
 
     // Pipe iframe-side Console.WriteLine output into the Logs panel.
@@ -11663,6 +11702,12 @@ async function bootstrap() {
     monoGameHost.onStdout = handleProgramPrint;
     monoGameHost.onStderr = (line) => {
         handleProgramStderr(line);
+        // Self-heal: if the runtime reports its asset registry came up
+        // empty (a Game1 rebuilt out from under us — e.g. after the frame
+        // watchdog nulled it, which the page otherwise never learns about),
+        // drop the sync baseline so the next Run re-registers everything.
+        // Without this the failure sticks until a full page reload.
+        if (isAssetNotRegisteredError(line)) assetSyncCache.invalidate();
         // KNI's `Console.Error.WriteLine` of a multi-line error message
         // arrives here as ONE stderr event with embedded newlines (the
         // iframe's console-forwarding bridge does join+post per call,
@@ -12295,17 +12340,21 @@ async function bootstrap() {
         },
     });
 
-    // Ctrl-click (Cmd-click on Mac) on a command → open help. Monaco's
-    // built-in Ctrl-click triggers go-to-definition via the registered
-    // DefinitionProvider, which for BUILT-IN commands returns null
-    // (they have no source location) — the built-in path is a no-op
-    // there and this handler fills the gap. For USER-DEFINED symbols
-    // (functions, labels), go-to-definition succeeds AND this
-    // handler also fires, but resolveCommandAtPosition returns null
-    // for non-commands (the LSP doesn't emit a `### name` hover for
-    // user-defined symbols) so nothing extra happens. Net effect:
-    // Ctrl-click on `position sprite` opens help, Ctrl-click on
-    // `myFunction` still jumps to source.
+    // Ctrl-click (Cmd-click on Mac): "go to the definition of this thing."
+    //
+    //   • A variable, type, user-defined function or label lives IN THE
+    //     PROGRAM — Monaco's built-in Ctrl-click already jumps to its
+    //     source via our DefinitionProvider. We must NOT also pop the
+    //     docs open in that case.
+    //   • A BUILT-IN command or a language keyword has no source location;
+    //     its "definition" is the documentation, so we open the docs.
+    //
+    // The determining factor is whether the LSP resolves a source
+    // location at the clicked position. We ask it directly (same call the
+    // DefinitionProvider makes) and only fall through to the docs when
+    // there is no in-program definition — otherwise Ctrl-clicking a user
+    // symbol like `myFunction` would jump to source AND open the help
+    // panel, which is the regression this guards against.
     //
     // We listen on mousedown so we react around the same time as the
     // built-in go-to-definition. Filter for actual content (not the
@@ -12324,11 +12373,27 @@ async function bootstrap() {
         // non-null in this scope.
         const model = editor!.getModel();
         if (!model) return;
-        const name = await resolveCommandAtPosition(model, pos);
-        if (name && openHelpForCommand(name)) return;
-        // Same three-tier fallback as the right-click action:
-        //   command → keyword map → free-text search.
-        const word = model.getWordAtPosition(pos)?.word;
+
+        // Ask the LSP whether this position has a program definition
+        // (variable/type/user function/label). If so, leave it entirely
+        // to the built-in go-to-definition and don't touch the docs.
+        const uri = model.uri.toString();
+        const mapped = toLspPosition(uri, pos.lineNumber - 1, pos.column - 1);
+        let hasProgramDefinition = false;
+        try {
+            hasProgramDefinition = !!(await runner.getDefinition(lspUriFor(uri), mapped.line, mapped.character));
+        } catch { hasProgramDefinition = false; }
+
+        const name = hasProgramDefinition ? null : await resolveCommandAtPosition(model, pos);
+        const word = model.getWordAtPosition(pos)?.word ?? null;
+
+        const action = resolveCtrlClickAction({ hasProgramDefinition, commandName: name, word });
+        // Built-in go-to-definition already handles the jump.
+        if (action === 'definition' || action === 'none') return;
+        // A resolved command opens its help entry; if it's not in the
+        // index (openHelpForCommand returns false) fall through to the
+        // keyword map / free-text search, same as the right-click action.
+        if (action === 'command-doc' && openHelpForCommand(name!)) return;
         if (!word) return;
         ensureHelpPanelOpen();
         if (await helpCtl.jumpToKeyword(word)) return;
