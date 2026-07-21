@@ -9612,13 +9612,35 @@ async function bootstrap() {
     // Launch (or restart) in a given mode: tear down any live session first,
     // then start. runOnce (run) / startDebug (debug) each capture the current
     // source into runningSource for the hot-reload diff.
+    // Re-entrancy guard for the launch pipeline. A monogame run is a
+    // three-step async dance (compileForRun → syncAssetsToRuntime →
+    // beginPendingProgram) that mutates shared state — the iframe's
+    // pending-context slot, the asset-sync cache, the game systems.
+    // Without this guard, "reloading quickly" (rapid Reset clicks / ⌘R)
+    // starts several launches at once; a second launch's stopAll() lands
+    // in the middle of the first's begin, the two-phase contexts clobber
+    // each other, and the runtime can come back up with an EMPTY content
+    // manager while the sync cache still thinks everything is registered —
+    // the intermittent "Asset '…' is not registered … Registered: []".
+    // Serialize by ignoring launches while one is already in flight; the
+    // button/shortcut is a no-op for the ~1-2s a launch takes, then works
+    // again.
+    let launchInFlight = false;
     const launchInMode = async (mode: 'debug' | 'run') => {
-        if (runActive || debugSessionActive) {
-            try { await stopAll(); } catch { /* best effort */ }
+        if (launchInFlight) return;
+        launchInFlight = true;
+        try {
+            if (runActive || debugSessionActive) {
+                try { await stopAll(); } catch { /* best effort */ }
+            }
+            if (mode === 'debug') await startDebug();
+            else await runOnce();
+        } finally {
+            launchInFlight = false;
         }
-        if (mode === 'debug') await startDebug();
-        else await runOnce();
     };
+    // Exposed for probes to assert overlapping launches are collapsed.
+    (window as any).__fadeLaunchInFlight = () => launchInFlight;
     // Primary click: launch the selected mode, or — while running — restart the
     // CURRENT session's mode (the label already reads Reset / Restart Debugging).
     const onLaunchClick = async () => {

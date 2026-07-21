@@ -81,6 +81,12 @@ describe('isAssetNotRegisteredError', () => {
         expect(isAssetNotRegisteredError(line)).toBe(true);
     });
 
+    it('matches the fadeAudio empty-registry loadClip error', () => {
+        const line = "[fade-audio] loadClip: catalog-imports/…/sfx_coin_double7 " +
+            "not registered. Registered: []";
+        expect(isAssetNotRegisteredError(line)).toBe(true);
+    });
+
     it('ignores unrelated stderr lines', () => {
         expect(isAssetNotRegisteredError('[fade] some other warning')).toBe(false);
         expect(isAssetNotRegisteredError('print output: hello')).toBe(false);

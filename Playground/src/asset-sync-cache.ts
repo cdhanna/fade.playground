@@ -100,5 +100,12 @@ export class AssetSyncCache {
  *  that was rebuilt out from under the page's sync cache. Used to self-heal
  *  by invalidating the cache so the next Run re-registers. */
 export function isAssetNotRegisteredError(line: string): boolean {
-    return line.includes('is not registered with BrowserContentManager');
+    // Texture/font path: BrowserContentManager (C#) —
+    //   "Asset 'X' is not registered with BrowserContentManager. Registered: []"
+    // Audio path: window.fadeAudio (JS) —
+    //   "[fade-audio] loadClip: X not registered. Registered: []"
+    // Either signals the runtime came up without our assets, so both should
+    // invalidate the sync cache and force a full re-register next Run.
+    return line.includes('is not registered with BrowserContentManager')
+        || /loadClip:.*not registered\. Registered:/i.test(line);
 }
