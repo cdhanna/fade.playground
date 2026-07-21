@@ -1,0 +1,53 @@
+# Deploy the GitHub OAuth CORS proxy (Cloudflare Worker) automatically
+# whenever its source or config changes on the production branch.
+#
+# Why this exists: the worker's origin allow-list lives in
+# oauth-proxy/wrangler.toml (`[vars] ALLOWED_ORIGINS`). Nothing else
+# deploys the worker — the Pages workflow only ships the site — so before
+# this job, editing that list did nothing until someone ran
+# `wrangler deploy` by hand. That's how `dev.fadebasic.com` ended up in
+# the toml but still 403'd in production. Now the toml is the source of
+# truth that actually ships.
+#
+# There is a single shared worker (`fade-oauth-proxy`) that every
+# deployment — local, test, prod — points at (see
+# Playground/src/sharing/github-auth-config.ts), so a push to the
+# production branch is the right (and only) trigger.
+#
+# Required repo secrets (CLOUDFLARE_ACCOUNT_ID is shared with the Pages
+# deploy; the API token must also grant Workers access):
+#   CLOUDFLARE_API_TOKEN   — needs "Workers Scripts: Edit" on the account
+#                            (the Pages deploy only needs "Pages: Edit", so
+#                            if you reuse that token, add the Workers scope)
+#   CLOUDFLARE_ACCOUNT_ID  — the account that owns fade-oauth-proxy
+name: Deploy OAuth proxy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'oauth-proxy/**'
+      - '.github/workflows/deploy-oauth-proxy.yml'
+  # Manual re-deploys (e.g. after rotating the client_id) that don't
+  # involve a file change.
+  workflow_dispatch:
+
+# Never let two deploys of the same worker race.
+concurrency:
+  group: deploy-oauth-proxy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: oauth-proxy
+          command: deploy
