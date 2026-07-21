@@ -955,6 +955,25 @@ function languageFor(name: string): string {
     return extra ?? 'plaintext';
 }
 
+// Swap the editor onto `tab`'s model while preserving per-file scroll +
+// cursor. Saves the OUTGOING file's Monaco view state (matched by model
+// instance, so it's independent of activeName timing) and restores the
+// INCOMING file's saved state after the swap. Must be used by EVERY
+// file-switch path — the file-list click (openFile), the editor tab-strip
+// click, and closeTab surfacing the next tab — otherwise switching one way
+// preserves scroll and the other way silently resets it to the top.
+function setEditorModelPreservingViewState(tab: Tab): void {
+    if (!editor) return;
+    const outgoing = editor.getModel();
+    const switching = outgoing !== tab.model;
+    if (switching && outgoing) {
+        const prevTab = [...tabs.values()].find((t) => t.model === outgoing);
+        if (prevTab) prevTab.viewState = editor.saveViewState();
+    }
+    editor.setModel(tab.model);
+    if (switching && tab.viewState) editor.restoreViewState(tab.viewState);
+}
+
 async function openFile(workspace: OpfsWorkspace, name: string) {
     let tab = tabs.get(name);
     if (!tab) {
@@ -1047,19 +1066,8 @@ async function openFile(workspace: OpfsWorkspace, name: string) {
     }
     setActiveName(name);
     if (editor) {
-        // Preserve scroll/cursor across file switches. Save the outgoing
-        // file's view state before swapping models, then restore the
-        // incoming file's saved state after. Matching by model instance
-        // (rather than activeName) keeps this correct regardless of the
-        // setActiveName call above.
-        const outgoing = editor.getModel();
-        const switching = outgoing !== tab.model;
-        if (switching && outgoing) {
-            const prevTab = [...tabs.values()].find((t) => t.model === outgoing);
-            if (prevTab) prevTab.viewState = editor.saveViewState();
-        }
-        editor.setModel(tab.model);
-        if (switching && tab.viewState) editor.restoreViewState(tab.viewState);
+        // Preserve scroll/cursor across file switches (see helper).
+        setEditorModelPreservingViewState(tab);
         // Ensure the Editor dockview tab itself is active — otherwise
         // `editor.focus()` is a no-op (Monaco can't take focus while
         // the panel containing it is hidden behind another tab).
@@ -1100,12 +1108,7 @@ function closeTab(name: string) {
         const next = tabs.keys().next().value;
         if (next) {
             setActiveName(next);
-            const nextTab = tabs.get(next)!;
-            if (editor) {
-                editor.setModel(nextTab.model);
-                // Restore the surfaced tab's scroll/cursor if we have it.
-                if (nextTab.viewState) editor.restoreViewState(nextTab.viewState);
-            }
+            setEditorModelPreservingViewState(tabs.get(next)!);
         } else {
             setActiveName(null);
             if (editor) editor.setModel(null);
@@ -1134,7 +1137,9 @@ function renderTabs() {
         label.title = name;
         label.onclick = () => {
             setActiveName(name);
-            if (editor) editor.setModel(tab.model);
+            // Same view-state preservation as the file-list path — switching
+            // via the tab strip must keep each file's scroll/cursor too.
+            setEditorModelPreservingViewState(tab);
             renderTabs();
             renderFileListSelection();
         };
@@ -1845,7 +1850,7 @@ function showTabContextMenu(x: number, y: number, name: string) {
         const tab = tabs.get(target);
         if (!tab) return;
         setActiveName(target);
-        if (editor) editor.setModel(tab.model);
+        setEditorModelPreservingViewState(tab);
         renderTabs();
         renderFileListSelection();
     };
@@ -3304,7 +3309,7 @@ async function bootstrap() {
                     const name = uriToName(uri);
                     const tab = tabs.get(name);
                     if (tab && editor) {
-                        editor.setModel(tab.model);
+                        setEditorModelPreservingViewState(tab);
                         activeName = name;
                         renderTabs();
                         renderFileListSelection();
@@ -3362,7 +3367,7 @@ async function bootstrap() {
                         const name = uriToName(model.uri.toString());
                         const tab = tabs.get(name);
                         if (tab && editor) {
-                            editor.setModel(tab.model);
+                            setEditorModelPreservingViewState(tab);
                             activeName = name;
                             renderTabs();
                             renderFileListSelection();
@@ -7362,7 +7367,7 @@ async function bootstrap() {
         const tab = tabs.get(file);
         if (tab && editor) {
             setActiveName(file);
-            editor.setModel(tab.model);
+            setEditorModelPreservingViewState(tab);
             renderTabs();
             renderFileListSelection();
             editor.focus();

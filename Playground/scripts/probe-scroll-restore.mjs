@@ -42,9 +42,21 @@ try {
     await page.waitForFunction(() => !!window.__fadeRunnerHelpers, { timeout: 90_000 });
     await page.waitForSelector('li[data-name="long.fbasic"]', { timeout: 30_000 });
 
-    // Open the long file and scroll well down.
-    await page.click('li[data-name="long.fbasic"]');
-    await page.waitForFunction(() => window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade')?.getModel()?.uri.toString().endsWith('long.fbasic'), { timeout: 15_000 });
+    // Open BOTH files (via the file list) so each has a tab in the strip,
+    // then switch between them using the TAB STRIP — the path a user
+    // actually uses, and the one that bypassed openFile before the fix.
+    const openViaList = async (name) => {
+        await page.click(`li[data-name="${name}"]`);
+        await page.waitForFunction((n) => window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade')?.getModel()?.uri.toString().endsWith(n), name, { timeout: 15_000 });
+    };
+    // Click the tab's label span (the onclick lives on the label, not the row).
+    const clickTab = async (name) => {
+        await page.click(`.tab[data-name="${name}"] span:not(.close):not(.tab-action)`);
+        await page.waitForFunction((n) => window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade')?.getModel()?.uri.toString().endsWith(n), name, { timeout: 15_000 });
+    };
+
+    await openViaList('short.fbasic');
+    await openViaList('long.fbasic');   // long ends up active
     await page.evaluate(() => {
         const ed = window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade');
         ed.revealLine(150);           // scroll line 150 into view
@@ -55,16 +67,13 @@ try {
     console.log('long.fbasic scrollTop after scrolling to line 150:', before?.top);
     if (!before || before.top <= 0) fail(`could not establish a scrolled position (scrollTop=${before?.top})`);
 
-    // Switch to the short file…
-    await page.click('li[data-name="short.fbasic"]');
-    await page.waitForFunction(() => window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade')?.getModel()?.uri.toString().endsWith('short.fbasic'), { timeout: 15_000 });
+    // Switch to short via TAB, then back to long via TAB.
+    await clickTab('short.fbasic');
     await page.waitForTimeout(200);
     const onShort = await editorScrollTop();
-    console.log('switched to short.fbasic, scrollTop:', onShort?.top);
+    console.log('switched (tab) to short.fbasic, scrollTop:', onShort?.top);
 
-    // …and back to the long file. Scroll should be restored.
-    await page.click('li[data-name="long.fbasic"]');
-    await page.waitForFunction(() => window.monaco.editor.getEditors().find((e) => e.getModel()?.getLanguageId() === 'fade')?.getModel()?.uri.toString().endsWith('long.fbasic'), { timeout: 15_000 });
+    await clickTab('long.fbasic');
     await page.waitForTimeout(300);
     const after = await editorScrollTop();
     console.log('switched back to long.fbasic, scrollTop:', after?.top);
