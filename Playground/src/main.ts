@@ -12186,6 +12186,22 @@ async function bootstrap() {
         // debugSessionActive flag below takes over.
         runActive = true;
         refreshRunButtons();
+        // Register assets before starting the debug session. Unlike the Run
+        // path (runOnce → compileForRun → syncAssetsToRuntime → begin), the
+        // debug-start path (dbg.start → monoGameHost.debugStart → LoadProgram)
+        // never registered assets — the first Debug only worked because a
+        // prior Run left them in the content manager, and a stop→restart
+        // rebuilds that manager empty, so `texture`/`load sfx clip`/`font`
+        // then fail with "Registered: []". Invalidate the sync cache (the
+        // restart cleared the runtime, so our "already synced" belief is
+        // stale) and push assets first. postMessage FIFO in the iframe
+        // guarantees these register-asset messages are processed before
+        // debug-start's LoadProgram runs the program.
+        if (currentProject?.type === 'monogame') {
+            assetSyncCache.invalidate();
+            try { await syncAssetsToRuntime(); }
+            catch (e) { console.error('[fade] debug: syncAssetsToRuntime failed', e); }
+        }
         const result = await starter();
         if (!result.ok) {
             setDebugStatus('failed to start', 'error');
