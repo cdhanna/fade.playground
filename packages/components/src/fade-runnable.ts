@@ -105,6 +105,34 @@ export class FadeRunnableElement extends HTMLElement {
         const toolbar = el('div', 'fade-runnable__toolbar');
         this.statusEl = el('div', 'fade-runnable__status');
 
+        // The WASM language tools take a few seconds to warm up on first load,
+        // during which the editor would show un-highlighted (plain) code and
+        // look half-broken. Cover the editor with a shimmer skeleton AND show a
+        // spinner + label at the toolbar's left edge, until the first
+        // semantic-token pass actually paints (onFirstTokens). A fallback timer
+        // clears both regardless, so a stalled LSP can't leave them stuck.
+        const skeleton = buildEditorSkeleton(value);
+        const loadingLabel = el('span', 'fade-runnable__loading-label');
+        loadingLabel.setAttribute('role', 'status');
+        loadingLabel.innerHTML =
+            '<span class="codicon codicon-loading fade-runnable__spin" aria-hidden="true"></span>' +
+            '<span>Loading language tools…</span>';
+        let loadingFallback: ReturnType<typeof setTimeout> | undefined;
+        let layoutSub: { dispose(): void } | undefined;
+        const clearLoading = () => {
+            if (loadingFallback) { clearTimeout(loadingFallback); loadingFallback = undefined; }
+            layoutSub?.dispose(); layoutSub = undefined;
+            if (skeleton.classList.contains('fade-runnable__skeleton--done')) return;
+            skeleton.classList.add('fade-runnable__skeleton--done');
+            loadingLabel.classList.add('fade-runnable__loading-label--done');
+            setTimeout(() => { skeleton.remove(); loadingLabel.remove(); }, 300);   // after the fade-out
+        };
+        loadingFallback = setTimeout(clearLoading, 20000);
+        // Leftmost in the toolbar (before the status text / spacer), so it reads
+        // as the editor bar's own loading state; inserted here once, kept leftmost
+        // regardless of which layout assembles the rest of the toolbar.
+        const mountLoadingLabel = () => toolbar.insertBefore(loadingLabel, toolbar.firstChild);
+
         this.runner = getSharedRunner(assetBase, this.mono ? 'monogame' : 'web');
         this.fadeEditor = createFadeEditor(editorHost, {
             runner: this.runner, value, readonly,
@@ -117,7 +145,25 @@ export class FadeRunnableElement extends HTMLElement {
             // commands tokenize as commands (purple), not identifiers (blue).
             lspReady: this.mono ? getMonoLspReady(this.runner, assetBase) : getLspReady(this.runner, assetBase),
             onDiagnostics: (errors) => this.onDiagnostics(errors),
+            onFirstTokens: clearLoading,
         });
+        // Appended after createFadeEditor so it covers Monaco's DOM.
+        editorHost.appendChild(skeleton);
+        // Align the skeleton's gutter/line grid to Monaco's actual rendered
+        // geometry (gutter width, decorations, line height, top padding) so the
+        // fake line numbers and code bars sit exactly where the real ones will.
+        // Metrics are only correct once the editor is laid out in the DOM, so
+        // sync on the next frame and on every subsequent re-layout.
+        const syncSkeleton = () => {
+            if (!skeleton.isConnected || !this.fadeEditor) return;
+            const m = this.fadeEditor.getLayoutMetrics();
+            skeleton.style.setProperty('--sk-gutter', m.contentLeft + 'px');
+            skeleton.style.setProperty('--sk-deco', m.decorationsWidth + 'px');
+            skeleton.style.setProperty('--sk-line', m.lineHeight + 'px');
+            skeleton.style.setProperty('--sk-top', Math.max(0, m.paddingTop) + 'px');
+        };
+        layoutSub = this.fadeEditor.onLayoutChange(syncSkeleton);
+        requestAnimationFrame(syncSkeleton);
 
         this.runBtn = iconBtn('fade-runnable__btn fade-runnable__btn--primary', 'play', 'Run', 'Run (⌘R)', () => void this.run());
         // Reload button — hidden until the buffer diverges from the running
@@ -128,7 +174,7 @@ export class FadeRunnableElement extends HTMLElement {
         // homepage demo, which is all about the debugger.
         this.hideRun = this.hasAttribute('hide-run') && this.debugEnabled;
 
-        if (noRun) { this.append(editorHost, toolbar, this.statusEl); toolbar.append(this.runBtn); return; }
+        if (noRun) { this.append(editorHost, toolbar, this.statusEl); toolbar.append(this.runBtn); mountLoadingLabel(); return; }
 
         this.iframe = document.createElement('iframe');
         this.iframe.className = 'fade-runnable__vm';
@@ -151,6 +197,7 @@ export class FadeRunnableElement extends HTMLElement {
 
         if (this.ide) this.layoutIde(editorHost, toolbar);
         else this.layoutStacked(editorHost, toolbar);
+        mountLoadingLabel();
         if (this.hasAttribute('autorun')) void this.run();
 
         // Detect TEST blocks and, if any, swap the Debug button for a Run-Tests
@@ -936,6 +983,44 @@ function escapeHtml(s: string): string {
     return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 function el(tag: string, className: string): HTMLElement { const e = document.createElement(tag); e.className = className; return e; }
+// A shimmer placeholder that covers the editor while the WASM language tools
+// warm up, so the first paint isn't un-highlighted "broken looking" code. The
+// row shapes MIRROR the source that's loading: per line we reproduce the
+// leading indent and one bar per whitespace-separated run (width = run length),
+// so the skeleton reads as the actual program's silhouette. A matching gutter
+// stub per row keeps the fake line numbers aligned. Purely decorative.
+function buildEditorSkeleton(source: string): HTMLElement {
+    const MAX_LINES = 60;   // enough to fill any editor viewport; the rest clips
+    const MAX_BARS = 16;    // cap absurdly busy lines
+    const MAX_CH = 48;      // clamp very long tokens so one bar can't dominate
+    const TAB = 4;
+    const rows = source.split('\n').slice(0, MAX_LINES).map((line) => {
+        const lead = line.match(/^[ \t]*/)?.[0] ?? '';
+        const indent = Math.min(lead.replace(/\t/g, ' '.repeat(TAB)).length, 40);
+        const bars = line.slice(lead.length).split(/\s+/).filter(Boolean)
+            .slice(0, MAX_BARS)
+            .map((w) => Math.min(Math.max(w.length, 1), MAX_CH));
+        return { indent, bars };
+    });
+
+    const root = el('div', 'fade-runnable__skeleton');
+    root.setAttribute('aria-hidden', 'true');
+    const gutter = el('div', 'fade-runnable__skeleton-gutter');
+    const code = el('div', 'fade-runnable__skeleton-code');
+    for (const { indent, bars } of rows) {
+        gutter.appendChild(el('i', 'fade-runnable__skeleton-num'));
+        const row = el('div', 'fade-runnable__skeleton-line');
+        if (indent) row.style.marginLeft = indent + 'ch';
+        for (const w of bars) {
+            const bar = el('span', 'fade-runnable__skeleton-bar');
+            bar.style.width = w + 'ch';
+            row.appendChild(bar);
+        }
+        code.appendChild(row);
+    }
+    root.append(gutter, code);
+    return root;
+}
 function spacer(): HTMLElement { return el('span', 'fade-runnable__spacer'); }
 function emptyMsg(t: string): string { return `<div class="fade-runnable__empty">${escapeHtml(t)}</div>`; }
 function iconBtn(className: string, codicon: string, label: string, title: string, onClick: (e: MouseEvent) => void): HTMLButtonElement {
@@ -992,7 +1077,54 @@ function injectStyles(): void {
     if (!style) { style = document.createElement('style'); style.setAttribute('data-fade-runnable', ''); document.head.appendChild(style); }
     style.textContent = `
 .fade-runnable { display: block; border: 1px solid var(--border-2); border-radius: 6px; overflow: hidden; background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.fade-runnable__editor { height: 220px; }
+.fade-runnable__editor { height: 220px; position: relative; }
+/* While the WASM language tools warm up: a spinner + label at the toolbar's
+   left edge, and a shimmer skeleton covering the editor. Both fade out once the
+   first semantic-token pass paints (…--done), then are removed. */
+.fade-runnable__loading-label {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 8px; min-width: 0; color: var(--fg-muted); font-size: 12px;
+    white-space: nowrap; transition: opacity 220ms ease;
+}
+.fade-runnable__loading-label--done { opacity: 0; }
+.fade-runnable__loading-label .codicon { font-size: 13px; }
+.fade-runnable__spin { display: inline-block; animation: fade-runnable-spin 1s linear infinite; }
+@keyframes fade-runnable-spin { to { transform: rotate(360deg); } }
+
+/* Skeleton overlay — opaque (var(--bg)) so it fully hides the un-highlighted
+   code; a gutter of line-number stubs + variable-width token bars. The gutter
+   width, decorations gap, line height and top offset are synced to Monaco's
+   real layout at runtime (--sk-* vars; fallbacks match the editor defaults). */
+.fade-runnable__skeleton {
+    position: absolute; inset: 0; z-index: 20; box-sizing: border-box;
+    display: flex; overflow: hidden;
+    padding-top: var(--sk-top, 0px);
+    background: var(--bg); transition: opacity 300ms ease;
+}
+.fade-runnable__skeleton--done { opacity: 0; pointer-events: none; }
+.fade-runnable__skeleton-gutter {
+    flex: 0 0 var(--sk-gutter, 40px); box-sizing: border-box;
+    padding-right: var(--sk-deco, 6px);
+    display: flex; flex-direction: column; align-items: flex-end;
+}
+.fade-runnable__skeleton-code { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+/* Every row (gutter stub + code line) is exactly one editor line tall so the
+   two columns stay aligned; bars are centered within the row. */
+.fade-runnable__skeleton-num { height: var(--sk-line, 19px); width: 14px; display: flex; align-items: center; }
+.fade-runnable__skeleton-num::before { content: ""; display: block; width: 100%; }
+.fade-runnable__skeleton-line { height: var(--sk-line, 19px); display: flex; align-items: center; gap: 8px; }
+.fade-runnable__skeleton-bar, .fade-runnable__skeleton-num::before {
+    height: 9px; border-radius: 3px; flex: 0 0 auto;
+    background: linear-gradient(90deg, var(--bg-3) 25%, var(--border-2) 50%, var(--bg-3) 75%);
+    background-size: 200% 100%;
+    animation: fade-runnable-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes fade-runnable-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .fade-runnable__spin,
+    .fade-runnable__skeleton-bar,
+    .fade-runnable__skeleton-num::before { animation: none; }
+}
 .fade-runnable__toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; background: var(--bg-2); border-top: 1px solid var(--border-2); }
 .fade-runnable__theme { flex: 0 0 auto; background: var(--bg-3); color: var(--fg); border: 1px solid var(--border-2); border-radius: 6px; font: inherit; font-size: 12px; padding: 3px 6px; cursor: pointer; }
 .fade-runnable__theme:focus { outline: none; border-color: var(--accent); }

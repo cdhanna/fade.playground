@@ -42,6 +42,12 @@ export interface CreateFadeEditorOptions {
      *  (0 = clean). Lets a host gate actions like Run/Debug on a compilable
      *  document. Only fires when diagnostics are enabled. */
     onDiagnostics?: (errorCount: number) => void;
+    /** Fired exactly once, the moment the first semantic-token pass actually
+     *  paints highlighting into the model (tokens applied, not just requested).
+     *  The WASM LSP can take a few seconds to warm up, during which the code
+     *  sits un-highlighted; hosts use this to clear a "loading language tools"
+     *  affordance. Never fires for a document that produces no tokens. */
+    onFirstTokens?: () => void;
 }
 
 export interface FadeEditor {
@@ -56,6 +62,13 @@ export interface FadeEditor {
     setBreakpointLines(lines: number[]): void;
     /** Highlight the paused line (1-based), or clear with null. */
     setCurrentLine(line: number | null): void;
+    /** Rendered geometry, for aligning an external overlay (e.g. a loading
+     *  skeleton) with the real gutter and line grid. `contentLeft` is where the
+     *  code starts (past glyph margin + line numbers + decorations). */
+    getLayoutMetrics(): { contentLeft: number; decorationsWidth: number; lineHeight: number; paddingTop: number };
+    /** Fires on every re-layout (font load, resize, gutter-width change) so an
+     *  overlay can re-sync its geometry. Returns a disposable. */
+    onLayoutChange(cb: () => void): { dispose(): void };
     dispose(): void;
 }
 
@@ -107,10 +120,18 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
 
     let decorations: string[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let firstTokensFired = false;
 
     const refresh = async () => {
         opts.runner.setDocument(uri.toString(), model.getValue());
         decorations = await applySemanticTokens(opts.runner, model, decorations);
+        // Fire once, the first time tokens actually land on screen (non-empty
+        // decoration set) — the signal a host uses to drop its "loading
+        // language tools" banner.
+        if (!firstTokensFired && decorations.length > 0) {
+            firstTokensFired = true;
+            opts.onFirstTokens?.();
+        }
         if (wantDiagnostics) {
             await applyDiagnostics(opts.runner, model);
             if (opts.onDiagnostics && !model.isDisposed()) {
@@ -184,6 +205,18 @@ export function createFadeEditor(container: HTMLElement, opts: CreateFadeEditorO
             }]);
             if (line != null) editor.revealLineInCenterIfOutsideViewport(line);
         },
+        getLayoutMetrics: () => {
+            const info = editor.getLayoutInfo();
+            return {
+                contentLeft: info.contentLeft,
+                decorationsWidth: info.decorationsWidth,
+                lineHeight: editor.getOption(monaco.editor.EditorOption.lineHeight),
+                // Vertical offset of the first line's top within the content
+                // (any editor top padding), independent of scroll.
+                paddingTop: editor.getTopForLineNumber(1) - editor.getScrollTop(),
+            };
+        },
+        onLayoutChange: (cb) => editor.onDidLayoutChange(() => cb()),
         dispose: () => {
             if (timer) clearTimeout(timer);
             sub.dispose();
