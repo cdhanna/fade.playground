@@ -34,6 +34,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
     {
+        version: '0.10.0',
+        date: '2026-07-23',
+        added: [
+            '`get text size x` and `get text size y` commands'
+        ]
+    },
+    {
         version: '0.9.0',
         date: '2026-07-23',
         added: [
