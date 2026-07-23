@@ -34,6 +34,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
     {
+        version: '0.9.0',
+        date: '2026-07-23',
+        added: [
+            '`pow` and `log` math commands'
+        ]
+    },
+    {
         version: '0.8.0',
         date: '2026-07-21',
         changed: [
