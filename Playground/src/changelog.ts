@@ -34,6 +34,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
     {
+        version: '0.10.2',
+        date: '2026-07-24',
+        fixed: [
+            'fix text render target bug'
+        ]
+    },
+    {
         version: '0.10.1',
         date: '2026-07-23',
         added: [
