@@ -34,6 +34,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
     {
+        version: '0.10.3',
+        date: '2026-07-24',
+        fixed: [
+            '`esc` key does not unfocus tab'
+        ]
+    },
+    {
         version: '0.10.2',
         date: '2026-07-24',
         fixed: [
