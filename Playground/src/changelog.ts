@@ -34,6 +34,16 @@ export const CHANGELOG: ChangelogEntry[] = [
     //     ],
     // },
     {
+        version: '0.10.1',
+        date: '2026-07-23',
+        added: [
+            'shift key commands'
+        ],
+        fixed: [
+            '`get text size x` and `get text size y` commands where incorrect'
+        ]
+    },
+    {
         version: '0.10.0',
         date: '2026-07-23',
         added: [
