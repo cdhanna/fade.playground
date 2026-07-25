@@ -33,6 +33,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //         'Initial Release! ',
     //     ],
     // },
+     {
+        version: '0.11.0',
+        date: '2026-07-24',
+        added: [
+            '`resume sfx` command'
+        ]
+    },
     {
         version: '0.10.3',
         date: '2026-07-24',
