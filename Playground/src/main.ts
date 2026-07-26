@@ -9018,41 +9018,93 @@ async function bootstrap() {
     // standalone per-file push so orphan .fbasic files keep getting
     // diagnostics — same behavior as before this branch.
     const lastPushedByUri = new Map<string, string>();
-    setInterval(() => {
-        let anyInProjectChanged = false;
-        let anyOrphanChanged = false;
-        let manifestChanged = false;
-        for (const m of monaco.editor.getModels()) {
-            const lang = m.getLanguageId();
-            const uri = m.uri.toString();
+    // Drive LSP doc-pushes (and the worker's full recompile) off actual model
+    // *edit events*, debounced — NOT a fixed-interval poll. The old poll woke
+    // every 250ms and re-read + diffed getValue() on EVERY model: that's
+    // O(project size) work every tick even when nothing changed, which janks a
+    // large project. Now a model's onDidChangeContent marks just that one model
+    // dirty (no getValue in the hot path) and schedules a single flush.
+    //
+    // Debounce: flush QUIET_MS after the last edit, but never later than
+    // MAX_WAIT_MS after the first pending edit, so diagnostics still refresh
+    // during sustained typing. Completions push synchronously on their own path
+    // (provideCompletionItems → rebuildAndPushProjectDoc / runner.setDocument),
+    // so completion freshness is independent of this gate.
+    const LSP_PUSH_QUIET_MS = 300;
+    const LSP_PUSH_MAX_WAIT_MS = 1000;
+    let projectDirty = false;
+    let manifestDirty = false;
+    // Keyed by URI so duplicate models sharing a URI (codingame services)
+    // collapse to one push; the model ref is read lazily at flush time.
+    const dirtyOrphanModels = new Map<string, monaco.editor.ITextModel>();
+    let flushTimer: number | undefined;
+    let firstDirtyAt = 0;
+
+    function flushLspDocs() {
+        flushTimer = undefined;
+        firstDirtyAt = 0;
+        const hadProject = projectDirty;
+        const hadOrphan = dirtyOrphanModels.size > 0;
+        const hadManifest = manifestDirty;
+        projectDirty = false;
+        manifestDirty = false;
+
+        // Orphan .fbasic files: push each changed one individually. getValue()
+        // runs here — only for the handful of models that actually changed.
+        for (const [uri, m] of dirtyOrphanModels) {
+            if (m.isDisposed()) continue;
             const value = m.getValue();
             if (lastPushedByUri.get(uri) === value) continue;
             lastPushedByUri.set(uri, value);
-            if (lang === 'fade') {
-                if (projectFileNameFromUri(uri)) {
-                    anyInProjectChanged = true;
-                } else {
-                    lsp.setDocument(uri, value);
-                    anyOrphanChanged = true;
-                }
-            } else if (uri.endsWith('/' + FADE_JSON_NAME)) {
-                manifestChanged = true;
-            }
+            lsp.setDocument(uri, value);
         }
-        if (anyInProjectChanged) {
-            // Rebuild the joined doc from the current set of in-project
-            // model contents and push once. Cheap to call; idempotent when
-            // joined text matches what we last pushed.
+        dirtyOrphanModels.clear();
+
+        if (hadProject) {
+            // Rebuild the joined doc from current in-project model contents and
+            // push once. Idempotent when the joined text is unchanged.
             rebuildAndPushProjectDoc();
         }
-        // Re-discover tests in the background whenever the active file moves.
-        if (anyInProjectChanged || anyOrphanChanged) refreshDebounce();
-        if (manifestChanged) {
+        // Re-discover tests in the background whenever a source file moves.
+        if (hadProject || hadOrphan) refreshDebounce();
+        if (hadManifest) {
             // fade.json edit landed — re-validate + refresh derived state.
             // refreshFadeProject calls rebuildAndPushProjectDoc itself.
             refreshFadeProject().then(() => refreshDebounce());
         }
-    }, 250);
+    }
+
+    function scheduleLspFlush() {
+        const now = Date.now();
+        if (firstDirtyAt === 0) firstDirtyAt = now;
+        if (flushTimer != null) clearTimeout(flushTimer);
+        // Idle debounce, clamped so we never defer past MAX_WAIT from the first
+        // pending edit (as the window fills, wait shrinks toward 0 → fires).
+        const remainingMax = LSP_PUSH_MAX_WAIT_MS - (now - firstDirtyAt);
+        const wait = Math.max(0, Math.min(LSP_PUSH_QUIET_MS, remainingMax));
+        flushTimer = window.setTimeout(flushLspDocs, wait);
+    }
+
+    // Classify one changed model and mark it dirty. No getValue() here — the
+    // flush reads content lazily and only for models that actually changed.
+    function markModelDirty(m: monaco.editor.ITextModel) {
+        const lang = m.getLanguageId();
+        const uri = m.uri.toString();
+        if (lang === 'fade') {
+            if (projectFileNameFromUri(uri)) projectDirty = true;
+            else dirtyOrphanModels.set(uri, m);
+        } else if (uri.endsWith('/' + FADE_JSON_NAME)) {
+            manifestDirty = true;
+        } else {
+            return; // not an LSP-tracked model — don't schedule a flush
+        }
+        scheduleLspFlush();
+    }
+
+    const attachLspSync = (m: monaco.editor.ITextModel) =>
+        m.onDidChangeContent(() => markModelDirty(m));
+    for (const m of monaco.editor.getModels()) attachLspSync(m);
+    monaco.editor.onDidCreateModel(attachLspSync);
 
     // Preload every workspace file's Monaco model first so refreshFadeProject
     // (and the project source concat) can read live content without an OPFS
@@ -9066,9 +9118,9 @@ async function bootstrap() {
             monaco.editor.createModel(text, languageFor(name), uri);
         }
     }
-    // Stamp every model as "already seen" so the polling interval's first
-    // tick doesn't push documents to the LSP before command DLLs are
-    // registered. The DLL-registration branch inside refreshFadeProject is
+    // Stamp every model as "already seen" so an early orphan-file edit (or a
+    // completion request) doesn't push documents to the LSP before command DLLs
+    // are registered. The DLL-registration branch inside refreshFadeProject is
     // always the authoritative first push (it runs after DLLs are loaded).
     for (const m of monaco.editor.getModels()) {
         lastPushedByUri.set(m.uri.toString(), m.getValue());
