@@ -33,6 +33,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //         'Initial Release! ',
     //     ],
     // },
+    {
+        version: '0.12.0',
+        date: '2026-07-25',
+        fixed: [
+            'screen shake commands'
+        ]
+    },
      {
         version: '0.11.0',
         date: '2026-07-24',
