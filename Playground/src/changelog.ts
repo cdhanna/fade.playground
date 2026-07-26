@@ -33,6 +33,13 @@ export const CHANGELOG: ChangelogEntry[] = [
     //         'Initial Release! ',
     //     ],
     // },
+     {
+        version: '0.12.2',
+        date: '2026-07-26',
+        fixed: [
+            'Exporter'
+        ]
+    },
       {
         version: '0.12.1',
         date: '2026-07-26',
