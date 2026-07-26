@@ -2472,6 +2472,27 @@ async function bootstrap() {
     // them via Monaco's decoration API with a CSS class per token type. CSS
     // in index.html colors each .fade-token-<type> class.
     const decorationsByUri = new Map<string, string[]>();
+    // (B) Signature of the token stream last *applied* to each URI. A recompile
+    // whose visible-file tokens are byte-identical (e.g. you edited a different
+    // file, or only whitespace) skips the deltaDecorations reconcile entirely.
+    const tokenSigByUri = new Map<string, string>();
+
+    // Is this model currently on screen? (A) We only re-decorate visible
+    // models — decorating every project file's model on each compile is what
+    // made editing/clicking clunky on large projects. Hidden models refresh on
+    // tab activation via __fadeRefreshSemanticTokens below.
+    function isModelVisible(model: monaco.editor.ITextModel): boolean {
+        if (model.isDisposed()) return false;
+        for (const ed of monaco.editor.getEditors()) {
+            if (!ed.getModel || ed.getModel() !== model) continue;
+            // A dockview panel that's stacked behind another has an editor
+            // whose DOM node isn't laid out (offsetParent null / zero size).
+            const node = ed.getContainerDomNode?.();
+            if (!node) return true; // can't tell — assume visible (safe)
+            if (node.offsetParent !== null || node.clientWidth > 0) return true;
+        }
+        return false;
+    }
 
     // openFile (module scope) calls into this on every tab activation so
     // preloaded-but-never-displayed models get tokenized before they're
@@ -2489,9 +2510,13 @@ async function bootstrap() {
         // in one pass, so for an in-project model we route there instead of
         // duplicating the work N times across N tabs.
         if (fileName) {
-            await applyProjectSemanticTokens();
+            // Force this file's tokens even if a tab-activation layout race
+            // means isModelVisible() can't see it as on-screen yet.
+            await applyProjectSemanticTokens(fileName);
             return;
         }
+        // Orphan single-file path: only tokenize when the file is on screen.
+        if (!isModelVisible(model)) return;
         const tokens = await lsp.getTokens(uri);
         // The model param was captured before the await above. By the
         // time getTokens resolves, the user may have closed the file or
@@ -2517,56 +2542,100 @@ async function bootstrap() {
                 },
             });
         }
+        // (B) Skip the Monaco reconcile when nothing changed.
+        const sig = decoSignature(newDecorations);
+        if (tokenSigByUri.get(uri) === sig) return;
+        tokenSigByUri.set(uri, sig);
         const prev = decorationsByUri.get(uri) ?? [];
         const next = model.deltaDecorations(prev, newDecorations);
         decorationsByUri.set(uri, next);
-        console.log('[fade-lsp] applied', newDecorations.length, 'decorations for', uri);
     }
 
-    // Fetch the joined doc's token stream once, decode it, then bin tokens
-    // by the file each line belongs to and apply per-file decorations. Called
-    // when any in-project file's tokens need a refresh — much cheaper than
-    // calling getTokens once per tab when N tabs all map to the same project
-    // URI on the worker side.
-    async function applyProjectSemanticTokens(): Promise<void> {
+    // Compact identity of a decoration set — cheap to build (visible file
+    // only) and used to short-circuit deltaDecorations when tokens are
+    // unchanged since the last apply.
+    function decoSignature(decos: monaco.editor.IModelDeltaDecoration[]): string {
+        let s = decos.length + ';';
+        for (const d of decos) {
+            const r = d.range;
+            s += r.startLineNumber + ',' + r.startColumn + ',' + r.endColumn + ','
+               + (d.options.inlineClassName ?? '') + '|';
+        }
+        return s;
+    }
+
+    // Fetch the joined doc's token stream once and apply per-file decorations.
+    //
+    // (A) Only the file(s) currently ON SCREEN get decorated — decorating every
+    // project model on each compile is O(project) main-thread work (token
+    // decode + per-token file lookup + Monaco decoration reconcile) and was the
+    // main cause of clunky editing/clicking on large projects. Hidden files
+    // refresh lazily when their tab is activated (__fadeRefreshSemanticTokens →
+    // applySemanticTokens → here with forceName). Tokens for hidden files are
+    // skipped with only integer counter bookkeeping, so the walk stays cheap.
+    //
+    // `forceName` decorates that file even if a tab-activation layout race
+    // means isModelVisible() can't confirm it's on screen yet.
+    async function applyProjectSemanticTokens(forceName?: string | null): Promise<void> {
         const map = projectSourceMap;
         if (!map) return;
+
+        // Which in-project files are visible right now → their joined-line
+        // ranges. Small set (usually 1), so the per-token range test is O(1).
+        const targets: { name: string; startLine: number; endLine: number; decos: monaco.editor.IModelDeltaDecoration[] }[] = [];
+        const seen = new Set<string>();
+        const addTarget = (name: string) => {
+            if (seen.has(name)) return;
+            const r = map.ranges.find((rr) => rr.name === name);
+            if (!r) return;
+            seen.add(name);
+            targets.push({ name, startLine: r.startLine, endLine: r.endLine, decos: [] });
+        };
+        if (forceName) addTarget(forceName);
+        for (const ed of monaco.editor.getEditors()) {
+            const m = ed.getModel?.();
+            if (!m || m.isDisposed()) continue;
+            const name = projectFileNameFromUri(m.uri.toString());
+            if (name && isModelVisible(m)) addTarget(name);
+        }
+        if (targets.length === 0) return; // nothing on screen needs project tokens
+
         const tokens = await lsp.getTokens(PROJECT_LSP_URI);
-        // Bucket decorations by file name first; apply them to each file's
-        // Monaco model at the end so a single LSP round-trip covers the
-        // whole project.
-        const byFile = new Map<string, monaco.editor.IModelDeltaDecoration[]>();
-        for (const r of map.ranges) byFile.set(r.name, []);
         let joinedLine = 0;
         let ch = 0;
         for (let i = 0; i + 4 < tokens.length; i += 5) {
             const dLine = tokens[i];
             const dChar = tokens[i + 1];
-            const len = tokens[i + 2];
-            const typeIdx = tokens[i + 3];
             if (dLine > 0) { joinedLine += dLine; ch = dChar; }
             else { ch += dChar; }
-            const mapped = map.fromProject(joinedLine, ch);
-            if (!mapped) continue;
-            const list = byFile.get(mapped.name);
-            if (!list) continue;
+            // Skip tokens outside every visible file — cheap integer test, no
+            // fromProject() scan, no Range allocation.
+            let tgt: typeof targets[number] | undefined;
+            for (const t of targets) {
+                if (joinedLine >= t.startLine && joinedLine < t.endLine) { tgt = t; break; }
+            }
+            if (!tgt) continue;
+            const len = tokens[i + 2];
+            const typeIdx = tokens[i + 3];
+            const localLine = joinedLine - tgt.startLine;
             const tokenName = tokenTypes[typeIdx] ?? 'unknown';
-            list.push({
-                range: new monaco.Range(mapped.line + 1, mapped.character + 1, mapped.line + 1, mapped.character + 1 + len),
+            tgt.decos.push({
+                range: new monaco.Range(localLine + 1, ch + 1, localLine + 1, ch + 1 + len),
                 options: { inlineClassName: 'fade-token-' + tokenName },
             });
         }
-        for (const r of map.ranges) {
-            const fileUri = monaco.Uri.file(`/workspace/${r.name}`);
+        for (const t of targets) {
+            const fileUri = monaco.Uri.file(`/workspace/${t.name}`);
             const model = monaco.editor.getModel(fileUri);
             // getModel can return a model that's mid-dispose (race between
             // workspace teardown and the LSP getTokens we just awaited).
-            // isDisposed() catches that case; without this check Monaco
-            // throws BugIndicatingError("Model is disposed!") and the
-            // bootstrap promise rejects.
             if (!model || model.isDisposed()) continue;
             const uriKey = fileUri.toString();
-            const next = model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], byFile.get(r.name) ?? []);
+            // (B) skip the reconcile when this file's tokens are unchanged.
+            const sig = decoSignature(t.decos);
+            if (tokenSigByUri.get(uriKey) === sig) continue;
+            tokenSigByUri.set(uriKey, sig);
+            const next = model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], t.decos);
             decorationsByUri.set(uriKey, next);
         }
     }
@@ -9871,13 +9940,20 @@ async function bootstrap() {
     reloadBtn.addEventListener('click', () => void onReloadClick());
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyR, () => void onReloadClick());
 
-    // On every edit: refresh the reload button immediately (cheap divergence
-    // check), and — when Auto hot reload is ON — debounce ~600ms and auto-apply
-    // the change to the running program. armAndApply sets reloadRude if the edit
-    // can't apply live (button goes red "Restart"). Auto OFF → manual click only.
+    // On every edit: refresh the reload button (debounced — see below), and —
+    // when Auto hot reload is ON — debounce ~600ms and auto-apply the change to
+    // the running program. armAndApply sets reloadRude if the edit can't apply
+    // live (button goes red "Restart"). Auto OFF → manual click only.
     let autoReloadTimer: number | undefined;
+    // updateReloadButton() calls getProjectSource(), which reads and re-joins
+    // EVERY project source (O(project size)) to check divergence from the
+    // running program. Running that per keystroke made typing clunky on large
+    // projects. The button's divergence/enabled state doesn't need per-character
+    // precision — refresh it shortly after the user pauses instead.
+    let reloadBtnTimer: number | undefined;
     editor.onDidChangeModelContent(() => {
-        void updateReloadButton();
+        window.clearTimeout(reloadBtnTimer);
+        reloadBtnTimer = window.setTimeout(() => void updateReloadButton(), 250);
         if (!autoHotReload) return;
         window.clearTimeout(autoReloadTimer);
         autoReloadTimer = window.setTimeout(async () => {
