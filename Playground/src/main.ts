@@ -1032,6 +1032,11 @@ async function openFile(workspace: OpfsWorkspace, name: string) {
         }
         // Debounced auto-save: 600ms idle → write to OPFS
         model.onDidChangeContent(() => {
+            // renderTabs() tears down + rebuilds the whole tab strip (reflow).
+            // The tab set doesn't change while typing — only the dirty dot, and
+            // only on the clean→dirty transition. Skip the per-keystroke rebuild
+            // once already dirty (was a real cost on large projects).
+            const wasDirty = tab!.dirty;
             tab!.dirty = true;
             // Surface the unflushed-edit state to the sharing panel
             // immediately so its Save button enables on the very first
@@ -1056,7 +1061,7 @@ async function openFile(workspace: OpfsWorkspace, name: string) {
                     console.error('[fade] save failed for', tab!.name, e);
                 }
             }, debounceMs);
-            renderTabs();
+            if (!wasDirty) renderTabs();
         });
         tabs.set(name, tab);
         // Notify the live-session (if hosting) that a new file is open so
@@ -2576,67 +2581,116 @@ async function bootstrap() {
     //
     // `forceName` decorates that file even if a tab-activation layout race
     // means isModelVisible() can't confirm it's on screen yet.
+    // In-flight guard so overlapping callers (fast per-keystroke highlight,
+    // diagnostics-settle refresh, scroll, tab-activate) coalesce into a single
+    // pass with at most one rerun queued — never a stack of concurrent worker
+    // round-trips.
+    let semTokRunning = false;
+    let semTokRerun = false;
     async function applyProjectSemanticTokens(forceName?: string | null): Promise<void> {
+        if (semTokRunning) { semTokRerun = true; return; }
+        semTokRunning = true;
+        try {
+            await applyProjectSemanticTokensInner(forceName);
+        } finally {
+            semTokRunning = false;
+            if (semTokRerun) { semTokRerun = false; void applyProjectSemanticTokens(); }
+        }
+    }
+
+    async function applyProjectSemanticTokensInner(forceName?: string | null): Promise<void> {
         const map = projectSourceMap;
         if (!map) return;
 
-        // Which in-project files are visible right now → their joined-line
-        // ranges. Small set (usually 1), so the per-token range test is O(1).
-        const targets: { name: string; startLine: number; endLine: number; decos: monaco.editor.IModelDeltaDecoration[] }[] = [];
+        // UNIFIED SINGLE PASS: tokens come from the SAME joined-project doc the
+        // reparse just built — already lexed+parsed+scope-resolved on the worker.
+        // We read it back viewport-scoped (getTokens on PROJECT_LSP_URI), which
+        // only re-classifies+serializes the visible slice of the cached doc — no
+        // separate per-file re-lex competing for the single worker thread. This
+        // runs on the diagnostics-settle, so coloring and squiggles land together
+        // from one pass. The padded window covers a normal source-sized file from
+        // any scroll position (no flicker); the scroll listener re-fetches for a
+        // very large single file.
+        const PAD = 400;
+
+        type Target = {
+            name: string; model: monaco.editor.ITextModel;
+            fileStart: number; fileEnd: number; jStart: number; jEnd: number;
+        };
+        const targets: Target[] = [];
         const seen = new Set<string>();
-        const addTarget = (name: string) => {
-            if (seen.has(name)) return;
+        const pushTarget = (name: string, model: monaco.editor.ITextModel, ed: monaco.editor.ICodeEditor | null) => {
+            if (seen.has(name) || model.isDisposed()) return;
             const r = map.ranges.find((rr) => rr.name === name);
             if (!r) return;
             seen.add(name);
-            targets.push({ name, startLine: r.startLine, endLine: r.endLine, decos: [] });
+            const fileLines = r.endLine - r.startLine;
+            let localStart = 0;
+            let localEnd = fileLines;
+            const vis = ed?.getVisibleRanges?.() ?? [];
+            if (ed && vis.length) {
+                let vpTop = Infinity;
+                let vpBot = -Infinity;
+                for (const v of vis) {
+                    vpTop = Math.min(vpTop, v.startLineNumber - 1); // 1-based → 0-based
+                    vpBot = Math.max(vpBot, v.endLineNumber);
+                }
+                localStart = Math.max(0, vpTop - PAD);
+                localEnd = Math.min(fileLines, vpBot + PAD);
+            }
+            targets.push({
+                name, model, fileStart: r.startLine, fileEnd: r.endLine,
+                jStart: r.startLine + localStart, jEnd: r.startLine + localEnd,
+            });
         };
-        if (forceName) addTarget(forceName);
+
+        // forceName (tab-activation refresh) → whole file, no viewport, since the
+        // editor's scroll state may not be settled yet.
+        if (forceName) {
+            const m = monaco.editor.getModel(monaco.Uri.file(`/workspace/${forceName}`));
+            if (m) pushTarget(forceName, m, null);
+        }
         for (const ed of monaco.editor.getEditors()) {
             const m = ed.getModel?.();
             if (!m || m.isDisposed()) continue;
             const name = projectFileNameFromUri(m.uri.toString());
-            if (name && isModelVisible(m)) addTarget(name);
+            if (name && isModelVisible(m)) pushTarget(name, m, ed);
         }
         if (targets.length === 0) return; // nothing on screen needs project tokens
 
-        const tokens = await lsp.getTokens(PROJECT_LSP_URI);
-        let joinedLine = 0;
-        let ch = 0;
-        for (let i = 0; i + 4 < tokens.length; i += 5) {
-            const dLine = tokens[i];
-            const dChar = tokens[i + 1];
-            if (dLine > 0) { joinedLine += dLine; ch = dChar; }
-            else { ch += dChar; }
-            // Skip tokens outside every visible file — cheap integer test, no
-            // fromProject() scan, no Range allocation.
-            let tgt: typeof targets[number] | undefined;
-            for (const t of targets) {
-                if (joinedLine >= t.startLine && joinedLine < t.endLine) { tgt = t; break; }
-            }
-            if (!tgt) continue;
-            const len = tokens[i + 2];
-            const typeIdx = tokens[i + 3];
-            const localLine = joinedLine - tgt.startLine;
-            const tokenName = tokenTypes[typeIdx] ?? 'unknown';
-            tgt.decos.push({
-                range: new monaco.Range(localLine + 1, ch + 1, localLine + 1, ch + 1 + len),
-                options: { inlineClassName: 'fade-token-' + tokenName },
-            });
-        }
         for (const t of targets) {
-            const fileUri = monaco.Uri.file(`/workspace/${t.name}`);
-            const model = monaco.editor.getModel(fileUri);
-            // getModel can return a model that's mid-dispose (race between
-            // workspace teardown and the LSP getTokens we just awaited).
-            if (!model || model.isDisposed()) continue;
-            const uriKey = fileUri.toString();
-            // (B) skip the reconcile when this file's tokens are unchanged.
-            const sig = decoSignature(t.decos);
+            if (t.model.isDisposed()) continue;
+            const _s = performance.now();
+            const tokens = await lsp.getTokens(PROJECT_LSP_URI, t.jStart, t.jEnd);
+            const _ms = performance.now() - _s;
+            if (_ms > 60) console.debug(`[fade-perf] getTokens ${t.name} joined=${t.jStart}-${t.jEnd} → ${_ms.toFixed(0)}ms tokens=${tokens.length / 5 | 0}`);
+
+            // Range tokens are delta-encoded re-based from line 0 (first token's
+            // deltaLine is its absolute joined line), so decode accumulates from
+            // 0, then map joined → this file's local coords.
+            const decos: monaco.editor.IModelDeltaDecoration[] = [];
+            let joinedLine = 0;
+            let ch = 0;
+            for (let i = 0; i + 4 < tokens.length; i += 5) {
+                const dLine = tokens[i];
+                const dChar = tokens[i + 1];
+                if (dLine > 0) { joinedLine += dLine; ch = dChar; }
+                else { ch += dChar; }
+                if (joinedLine < t.fileStart || joinedLine >= t.fileEnd) continue;
+                const len = tokens[i + 2];
+                const typeIdx = tokens[i + 3];
+                const localLine = joinedLine - t.fileStart;
+                decos.push({
+                    range: new monaco.Range(localLine + 1, ch + 1, localLine + 1, ch + 1 + len),
+                    options: { inlineClassName: 'fade-token-' + (tokenTypes[typeIdx] ?? 'unknown') },
+                });
+            }
+            if (t.model.isDisposed()) continue;
+            const uriKey = t.model.uri.toString();
+            const sig = decoSignature(decos);
             if (tokenSigByUri.get(uriKey) === sig) continue;
             tokenSigByUri.set(uriKey, sig);
-            const next = model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], t.decos);
-            decorationsByUri.set(uriKey, next);
+            decorationsByUri.set(uriKey, t.model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], decos));
         }
     }
 
@@ -2715,26 +2769,23 @@ async function bootstrap() {
         triggerCharacters: [' ', '.', '(', '=', '+', '*', '-', '/'],
         provideCompletionItems: async (model, position) => {
             const uri = model.uri.toString();
-            // Force a synchronous flush of the current model's text to the
-            // LSP before we ask for completions. The 250ms polling loop
-            // means the LSP can be one keystroke behind by the time
-            // Monaco's auto-trigger fires (especially with a space-trigger
-            // right after a command word) — completions then run against
-            // a stale AST that doesn't yet contain the token the user
-            // just typed, and the right items don't surface until the
-            // user pauses long enough for the poll to catch up.
-            // Worker postMessage is FIFO, so the setDocument below lands
-            // in the worker queue ahead of getCompletions and the
-            // computation sees fresh source.
-            if (model.getLanguageId() === 'fade') {
-                if (projectFileNameFromUri(uri)) {
-                    rebuildAndPushProjectDoc();
-                } else {
-                    const value = model.getValue();
-                    if (lastPushedByUri.get(uri) !== value) {
-                        lastPushedByUri.set(uri, value);
-                        runner.setDocument(uri, value);
-                    }
+            // Keep the LSP roughly in sync before asking for completions — but
+            // do NOT force a full project recompile here. On a large multi-file
+            // project each push re-lexes+parses the whole joined doc (~100-500ms
+            // in WASM), and this provider fires on every space/operator trigger;
+            // forcing a push per keystroke flooded the single-threaded worker so
+            // getTokens/completions stalled for SECONDS behind the backlog.
+            //
+            // The event-driven debounced flush (scheduleLspFlush) already pushes
+            // ~300ms after edits — fresh by the time you pause to read a
+            // suggestion. For PROJECT files we rely on that. Orphan single files
+            // are cheap (one small doc), so we still fast-path those, but only
+            // when actually changed (avoids re-pushing on every trigger).
+            if (model.getLanguageId() === 'fade' && !projectFileNameFromUri(uri)) {
+                const value = model.getValue();
+                if (lastPushedByUri.get(uri) !== value) {
+                    lastPushedByUri.set(uri, value);
+                    runner.setDocument(uri, value);
                 }
             }
             const mapped = toLspPosition(uri, position.lineNumber - 1, position.column - 1);
@@ -3211,6 +3262,46 @@ async function bootstrap() {
         source: d.source ?? 'fade',
     });
 
+    // Coalesced project-doc diagnostics rendering — see the handler below.
+    // Runs the two O(project) main-thread costs (semantic-token decoration +
+    // Problems rebuild) at most once per debounce window, no matter how many
+    // diagnostics pushes arrive (the completion provider can trigger one per
+    // keystroke on a large multi-file project). [fade-perf] logs the cost so
+    // we can confirm which part dominates.
+    let diagRenderScheduled = false;
+    let diagRenderRunning = false;
+    async function runProjectDiagRender() {
+        // Only one in flight — applyProjectSemanticTokens awaits a worker
+        // getTokens round-trip, so without this guard rapid diagnostics would
+        // stack concurrent getTokens calls (each queued behind the worker),
+        // which is exactly the backlog that produced multi-second stalls.
+        if (diagRenderRunning) { diagRenderScheduled = true; return; }
+        diagRenderRunning = true;
+        diagRenderScheduled = false;
+        try {
+            const t0 = performance.now();
+            await applyProjectSemanticTokens();
+            const t1 = performance.now();
+            renderProblems();
+            const t2 = performance.now();
+            if (t2 - t0 > 6) {
+                console.debug(`[fade-perf] diag-render tokens=${(t1 - t0).toFixed(1)}ms problems=${(t2 - t1).toFixed(1)}ms`);
+            }
+        } finally {
+            diagRenderRunning = false;
+            // A render was requested while we were running — run once more.
+            if (diagRenderScheduled) {
+                diagRenderScheduled = false;
+                window.setTimeout(() => void runProjectDiagRender(), 120);
+            }
+        }
+    }
+    function scheduleProjectDiagRender() {
+        if (diagRenderScheduled || diagRenderRunning) { diagRenderScheduled = true; return; }
+        diagRenderScheduled = true;
+        window.setTimeout(() => void runProjectDiagRender(), 120);
+    }
+
     lsp.setDiagnosticsHandler((uri, diagnostics) => {
         // Multi-source fan-out: when the LSP pushed diagnostics for the
         // joined project doc, bucket each entry by origin file (via
@@ -3226,9 +3317,7 @@ async function bootstrap() {
                 if (!split) continue;
                 byFile.get(split.name)!.push(split.diagnostic);
             }
-            // Refresh semantic tokens once for the whole project — see
-            // applyProjectSemanticTokens for the same fan-out shape.
-            void applyProjectSemanticTokens();
+            // Markers (red squiggles) are cheap — apply immediately.
             for (const [name, diags] of byFile) {
                 const fileUri = monaco.Uri.file(`/workspace/${name}`).toString();
                 const allModels = monaco.editor.getModels().filter((m) => m.uri.toString() === fileUri);
@@ -3238,7 +3327,13 @@ async function bootstrap() {
                 }
                 diagnosticsByUri.set(fileUri, diags);
             }
-            renderProblems();
+            // Semantic-token decoration (worker getTokens + decode the whole
+            // joined token stream + deltaDecorations) and the Problems-panel
+            // rebuild are O(project) main-thread work. On a large multi-file
+            // project the completion provider's per-keystroke setDocument makes
+            // the LSP push diagnostics per keystroke — running these per
+            // keystroke made the editor crawl. Coalesce them behind a debounce.
+            scheduleProjectDiagRender();
             const wasBlocked = lastBlockedByErrors;
             refreshRunButtons();
             if (wasBlocked && !lastBlockedByErrors) refreshDebounce();
@@ -4946,6 +5041,39 @@ async function bootstrap() {
     }
 
     const workspace = new OpfsWorkspace();
+
+    // ── Dev-only: import a public GitHub repo as a local project ──────────
+    // Pulls a repo's files straight into OPFS — no asset bundling, no
+    // dev.fadebasic.com round-trip. Handy for testing a real project (e.g.
+    // killcode) against a locally-built runtime. Skips .fade-cache/ + .git/.
+    // Every file is written as bytes; workspace.read() decodes text on demand.
+    // Usage:
+    //   URL:     ?importGithub=cdhanna/killcode           (optionally @branch)
+    //   console: await window.__fadeImportRepo('cdhanna','killcode')
+    async function importGitHubRepo(owner: string, repo: string, branch = 'main', projectName?: string): Promise<void> {
+        const name = projectName ?? repo;
+        const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
+        const tree = await fetch(treeUrl).then((r) => r.json());
+        if (!tree?.tree) throw new Error(`GitHub tree fetch failed for ${owner}/${repo}@${branch}: ${tree?.message ?? 'unknown'}`);
+        const blobs = (tree.tree as any[]).filter((e) =>
+            e.type === 'blob' && !e.path.startsWith('.fade-cache/') && !e.path.startsWith('.git/'));
+        if (!blobs.length) throw new Error(`no importable files in ${owner}/${repo}@${branch}`);
+        await workspace.setActiveProject(name);
+        for (let i = 0; i < blobs.length; i++) {
+            const path = blobs[i].path as string;
+            const encoded = path.split('/').map(encodeURIComponent).join('/');
+            const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encoded}`;
+            const resp = await fetch(url);
+            const buf = new Uint8Array(await resp.arrayBuffer());
+            await workspace.writeBytes(path, buf);
+            if (i % 5 === 0) console.info(`[fade-import] ${i + 1}/${blobs.length} ${path}`);
+        }
+        localStorage.setItem(ACTIVE_PROJECT_KEY, name);
+        console.info(`[fade-import] imported ${blobs.length} files from ${owner}/${repo}@${branch} → project "${name}"`);
+    }
+    (window as any).__fadeImportRepo = (owner: string, repo: string, branch = 'main', projectName?: string) =>
+        importGitHubRepo(owner, repo, branch, projectName).then(() => { window.location.search = ''; });
+
     // Wipe any stale live-session sandboxes from a previous reload BEFORE
     // workspace.init() picks an active project — otherwise we could end
     // up "active" on a `__live_session_*` folder that's about to be deleted.
@@ -4977,6 +5105,30 @@ async function bootstrap() {
         console.warn('[fade-collab] live-session startup cleanup failed', e);
     }
     const hadExistingProject = await workspace.init();
+
+    // ?importGithub=owner/repo[@branch] → pull that repo into OPFS and reload
+    // onto it. Runs after init() (so workspace.root exists) and reloads to a
+    // CLEAN url so we don't re-import in a loop. Dev-only convenience.
+    {
+        const spec = new URLSearchParams(location.search).get('importGithub');
+        if (spec) {
+            const [ownerRepo, branch] = spec.split('@');
+            const [owner, repo] = (ownerRepo || '').split('/');
+            if (owner && repo) {
+                try {
+                    await importGitHubRepo(owner, repo, branch || 'main');
+                    window.location.search = ''; // clean reload → boots the imported project
+                    return;
+                } catch (e) {
+                    console.error('[fade-import] failed:', e);
+                    pgSplash?.hide();
+                    alert(`Import of ${spec} failed — see console.`);
+                    return;
+                }
+            }
+        }
+    }
+
     if (!hadExistingProject) {
         // Brand-new install (or post-reset). Hide the splash, show the
         // first-run modal, and stop booting. The submit handler reloads
@@ -9095,12 +9247,20 @@ async function bootstrap() {
     // dirty (no getValue in the hot path) and schedules a single flush.
     //
     // Debounce: flush QUIET_MS after the last edit, but never later than
-    // MAX_WAIT_MS after the first pending edit, so diagnostics still refresh
-    // during sustained typing. Completions push synchronously on their own path
-    // (provideCompletionItems → rebuildAndPushProjectDoc / runner.setDocument),
-    // so completion freshness is independent of this gate.
-    const LSP_PUSH_QUIET_MS = 300;
-    const LSP_PUSH_MAX_WAIT_MS = 1000;
+    // MAX_WAIT_MS after the first pending edit.
+    //
+    // This flush drives the DIAGNOSTIC recompile — pushing the joined project
+    // doc, which re-lexes+parses+scope-resolves the whole project. On the net10
+    // runtime the jiterpreter warms that to ~150ms even on a 3400-line project
+    // (it was ~1.5s on net8, which forced a long defer so it wouldn't stall
+    // typing). At ~150ms it's cheap enough to run essentially LIVE: a short quiet
+    // window makes diagnostics track the cursor, and a modest max-wait keeps them
+    // refreshing during sustained typing rather than only on a pause. The worker
+    // keeps up because superseded reparses are coalesced/dropped and the priority
+    // drain services highlight/hover/completion ahead of the reparse. If a much
+    // larger project ever makes the reparse expensive again, raise these.
+    const LSP_PUSH_QUIET_MS = 150;
+    const LSP_PUSH_MAX_WAIT_MS = 500;
     let projectDirty = false;
     let manifestDirty = false;
     // Keyed by URI so duplicate models sharing a URI (codingame services)
@@ -9162,6 +9322,9 @@ async function bootstrap() {
         if (lang === 'fade') {
             if (projectFileNameFromUri(uri)) projectDirty = true;
             else dirtyOrphanModels.set(uri, m);
+            // Highlighting is refreshed on the diagnostics settle (unified single
+            // pass — same joined reparse produces tokens + diagnostics), so no
+            // separate per-keystroke highlight trigger is needed here.
         } else if (uri.endsWith('/' + FADE_JSON_NAME)) {
             manifestDirty = true;
         } else {
@@ -9754,6 +9917,15 @@ async function bootstrap() {
             if (runActive || debugSessionActive) {
                 try { await stopAll(); } catch { /* best effort */ }
             }
+            // Funnel fade.json `settings.gc` to the monogame runtime before the
+            // run's ResetFade builds a VM (FIFO postMessage → applied first).
+            // sweepInterval 0 → runtime keeps the VM default; paranoid enables
+            // the poison-on-free diagnostic for hunting GC-liveness bugs.
+            if (currentProject?.type === 'monogame') {
+                const gc = currentProject.settings?.gc;
+                try { await monoGameHost.setGcSettings(gc?.sweepInterval ?? 0, gc?.paranoid ?? false); }
+                catch { /* iframe not ready — runtime falls back to defaults */ }
+            }
             if (mode === 'debug') await startDebug();
             else await runOnce();
         } finally {
@@ -9965,6 +10137,20 @@ async function bootstrap() {
         }, 600);
     });
 
+    // Re-fetch viewport-scoped semantic tokens as the user scrolls. For a normal
+    // source-sized file the padded window already covers the whole file, so this
+    // no-ops via the unchanged-signature skip; it only does real work when a very
+    // large single file scrolls its window. Debounced so a scroll gesture fires
+    // at most one refresh.
+    let scrollTokenTimer: number | undefined;
+    editor.onDidScrollChange(() => {
+        if (scrollTokenTimer != null) return;
+        scrollTokenTimer = window.setTimeout(() => {
+            scrollTokenTimer = undefined;
+            void applyProjectSemanticTokens();
+        }, 150);
+    });
+
     // Export: build a static zip containing the runtime + the user's
     // compiled bytecode + the project's command DLLs + a synthesized
     // fade-manifest.json. Drop it on any static host (itch.io, GitHub
@@ -10146,6 +10332,9 @@ async function bootstrap() {
                     source: 'program.fbasic',
                     assets: xnbEntries.map((a) => a.name),
                     audio: audioEntries.map((a) => ({ name: a.name, file: `${a.name}${a.ext}` })),
+                    // Carry fade.json GC settings so the exported standalone boot
+                    // applies them before LoadProgram (see index.html self-boot).
+                    ...(currentProject?.settings?.gc ? { settings: { gc: currentProject.settings.gc } } : {}),
                 };
                 files['fade-manifest.json'] = strToU8(JSON.stringify(fadeManifest, null, 2));
 

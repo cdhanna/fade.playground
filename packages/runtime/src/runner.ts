@@ -441,13 +441,22 @@ export class FadeRunner {
         await Promise.all(awaits);
     }
 
-    async getTokens(uri: string): Promise<number[]> {
+    // Semantic tokens for `uri`. When startLine is given, only tokens whose
+    // (0-based) line is in [startLine, endLine) are returned — the caller uses
+    // this to request just the editor viewport on large joined-project docs,
+    // where serializing the whole token stream costs seconds. endLine <= 0 (or
+    // omitted) means "to end of document". Range is delta-encoded re-based to
+    // the first in-range token, so the decoder still accumulates from line 0.
+    async getTokens(uri: string, startLine?: number, endLine?: number): Promise<number[]> {
         const id = ++this.nextId;
         return new Promise<number[]>((resolve) => {
             this.pending.set(id, (tokensJson: string) => {
                 try { resolve(JSON.parse(tokensJson)); } catch { resolve([]); }
             });
-            this.worker.postMessage({ type: 'lsp-tokens', id, uri });
+            const msg: { type: string; id: number; uri: string; startLine?: number; endLine?: number } =
+                { type: 'lsp-tokens', id, uri };
+            if (typeof startLine === 'number') { msg.startLine = startLine; msg.endLine = endLine ?? 0; }
+            this.worker.postMessage(msg);
         });
     }
 
