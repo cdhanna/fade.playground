@@ -35,9 +35,24 @@ for (const [label, dir] of [['dby/FadeBasic', fadeRepoDir], ['Fade.MonoGame', mo
 
 // Unique 4-part dev version → SEM_VER 0.0.0.<n>. Uniqueness dodges NuGet's
 // restore cache so the monogame build resolves THIS core, not a cached one.
-const buildNo = process.env.FADE_ALL_SOURCE_BUILD || String(Math.floor(Date.now() / 1000) % 100000000);
+// The 4th (revision) component becomes the assembly version's revision, which
+// MUST be <= 65534 (it's a UInt16) or `dotnet pack` fails with CS7034. Unix
+// seconds mod 100000000 blows past that, so we mod into the valid range —
+// ~65000s (~18h) of uniqueness, more than enough for a dev session. Override
+// with FADE_ALL_SOURCE_BUILD (also kept <= 65534).
+const rawBuild = process.env.FADE_ALL_SOURCE_BUILD
+    ? Number(process.env.FADE_ALL_SOURCE_BUILD)
+    : Math.floor(Date.now() / 1000);
+const buildNo = String(((rawBuild % 65000) + 65000) % 65000);
 const coreSemVer = `0.0.0.${buildNo}`;
 const run = (cmd, cwd, env) => execSync(cmd, { cwd, stdio: 'inherit', env: { ...process.env, ...env } });
+
+// `--aot` (or FADE_AOT=1) → publish the web runtime with WASM AOT. Propagated
+// to build-runtime.mjs via process.env (run() forwards it). Off by default so
+// the full-stack build stays as fast as it can. Only the web LSP runtime reads
+// FADE_AOT — the monogame runtime build ignores it.
+if (process.argv.includes('--aot')) process.env.FADE_AOT = '1';
+if (/^(1|true|yes)$/i.test(process.env.FADE_AOT ?? '')) console.log(`${LOG} AOT enabled for web runtime`);
 
 console.log(`${LOG} building full stack from source; core dev version = ${coreSemVer}`);
 

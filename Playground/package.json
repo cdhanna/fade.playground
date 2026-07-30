@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",
+    "build:runtime:aot": "node scripts/build-runtime.mjs --aot",
     "build:monogame-runtime": "node scripts/build-monogame-runtime.mjs",
     "build:all-source": "node scripts/build-all-source.mjs",
+    "build:all-source:aot": "node scripts/build-all-source.mjs --aot",
     "build:docs-index": "node --experimental-strip-types scripts/build-docs-index.mjs",
     "sync:public-docs": "node scripts/sync-public-docs.mjs",
     "predev": "node scripts/build-runtime.mjs && node scripts/sync-public-docs.mjs",
