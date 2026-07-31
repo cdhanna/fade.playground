@@ -1048,6 +1048,10 @@ async function openFile(workspace: OpfsWorkspace, name: string) {
             tab!.saveTimer = window.setTimeout(async () => {
                 try {
                     await workspace.write(tab!.name, tab!.model.getValue());
+                    // Keep the vscode virtual FS in step with saved content so a
+                    // cross-file go-to-definition resolving this file reads the
+                    // current text, not the stale copy registered at open time.
+                    registerVirtualFile(tab!.model.uri, tab!.model.getValue());
                     tab!.dirty = false;
                     if (!anyTabDirty()) sharingController?.setHasDirtyTabs(false);
                     renderTabs();
@@ -1990,6 +1994,16 @@ function uriToName(uri: string): string {
     return ix >= 0 ? uri.slice(ix + 1) : uri;
 }
 
+// Full workspace-relative name (INCLUDING nested folders) from a model URI —
+// e.g. file:///workspace/code/setups.fbasic → code/setups.fbasic. Unlike
+// uriToName (basename only), this survives folder paths, so it's what tab /
+// file-open lookups must use. Returns null for non-workspace URIs.
+function workspaceNameFromUri(uri: string): string | null {
+    const path = monaco.Uri.parse(uri).path;
+    const prefix = '/workspace/';
+    return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
 // ─── runner ─────────────────────────────────────────────────────────────────
 // FadeRunner + the runtime protocol DTOs live in @fadebasic/runtime
 // (Phase 2b — see docs/embeddable-components-proposal.md).
@@ -2156,7 +2170,46 @@ async function bootstrap() {
     pgSplash?.setStatus('Initializing editor…');
     await initServices({
         ...getModelServiceOverride(),
-        ...getEditorServiceOverride(async () => undefined),
+        // Cross-file navigation opener. The vscode editor service calls this
+        // whenever something — go-to-definition, find-all-references, peek's
+        // "open" — needs to surface a resource that isn't the active model.
+        // The app drives ONE standalone editor with per-tab model swapping, so
+        // we translate the request into a tab switch + reveal. This used to be
+        // `async () => undefined`, which made EVERY cross-file jump silently
+        // no-op (same-file jumps worked only because they never left the active
+        // model). Returning our editor tells the service the open succeeded.
+        ...getEditorServiceOverride(async (modelRef, options) => {
+            try {
+                const uri = modelRef.object?.textEditorModel?.uri;
+                const path = uri?.path ?? '';
+                const prefix = '/workspace/';
+                if (!path.startsWith(prefix)) return undefined;
+                const name = path.slice(prefix.length); // keeps nested folders
+                await openFile(workspace, name);
+                // `selection` rides on ITextEditorOptions (a subtype the service
+                // passes at runtime for text navigations); the callback's static
+                // type is the broader IEditorOptions, so read it through a cast.
+                const sel = (options as {
+                    selection?: { startLineNumber: number; startColumn: number; endLineNumber?: number; endColumn?: number };
+                } | undefined)?.selection;
+                if (sel && editor) {
+                    editor.revealRangeInCenterIfOutsideViewport(
+                        new monaco.Range(
+                            sel.startLineNumber, sel.startColumn,
+                            sel.endLineNumber ?? sel.startLineNumber,
+                            sel.endColumn ?? sel.startColumn,
+                        ),
+                        monaco.editor.ScrollType.Smooth,
+                    );
+                    editor.setPosition({ lineNumber: sel.startLineNumber, column: sel.startColumn });
+                    editor.focus();
+                }
+                return editor ?? undefined;
+            } catch (e) {
+                console.error('[fade] cross-file editor open failed', e);
+                return undefined;
+            }
+        }),
         ...getConfigurationServiceOverride(),
         ...getKeybindingsServiceOverride(),
         ...getLanguagesServiceOverride(),
@@ -2810,23 +2863,29 @@ async function bootstrap() {
         triggerCharacters: [' ', '.', '(', '=', '+', '*', '-', '/'],
         provideCompletionItems: async (model, position) => {
             const uri = model.uri.toString();
-            // Keep the LSP roughly in sync before asking for completions — but
-            // do NOT force a full project recompile here. On a large multi-file
-            // project each push re-lexes+parses the whole joined doc (~100-500ms
-            // in WASM), and this provider fires on every space/operator trigger;
-            // forcing a push per keystroke flooded the single-threaded worker so
-            // getTokens/completions stalled for SECONDS behind the backlog.
-            //
-            // The event-driven debounced flush (scheduleLspFlush) already pushes
-            // ~300ms after edits — fresh by the time you pause to read a
-            // suggestion. For PROJECT files we rely on that. Orphan single files
-            // are cheap (one small doc), so we still fast-path those, but only
-            // when actually changed (avoids re-pushing on every trigger).
-            if (model.getLanguageId() === 'fade' && !projectFileNameFromUri(uri)) {
-                const value = model.getValue();
-                if (lastPushedByUri.get(uri) !== value) {
-                    lastPushedByUri.set(uri, value);
-                    runner.setDocument(uri, value);
+            // Push the CURRENT doc before asking for completions so the results
+            // reflect what was just typed. The debounced flush lags active
+            // typing, so relying on it (the old behavior for project files) left
+            // mid-typing completions running against a STALE joined doc — the
+            // just-typed `x = ` assignment context wasn't parsed yet, so it fell
+            // back to command-only completions and dropped every variable. The
+            // worker services this reparse BEFORE the (prioritized) completion
+            // for the same uri (see runtime.js _nextIndex), so completions see
+            // the fresh parse. Only push when the text actually changed, so a
+            // bare re-trigger (Ctrl+Space, no edit) stays cheap.
+            if (model.getLanguageId() === 'fade') {
+                if (projectFileNameFromUri(uri) && projectSourceMap) {
+                    const joined = ProjectSourceMap.build(readProjectSourcesSync()).joined;
+                    if (joined !== lastPushedProjectText) {
+                        lastPushedProjectText = joined;
+                        runner.setDocument(PROJECT_LSP_URI, joined);
+                    }
+                } else if (!projectFileNameFromUri(uri)) {
+                    const value = model.getValue();
+                    if (lastPushedByUri.get(uri) !== value) {
+                        lastPushedByUri.set(uri, value);
+                        runner.setDocument(uri, value);
+                    }
                 }
             }
             const mapped = toLspPosition(uri, position.lineNumber - 1, position.column - 1);
@@ -3494,19 +3553,20 @@ async function bootstrap() {
 
                 li.append(icon, msg, loc);
                 li.onclick = () => {
-                    const name = uriToName(uri);
-                    const tab = tabs.get(name);
-                    if (tab && editor) {
-                        setEditorModelPreservingViewState(tab);
-                        activeName = name;
-                        renderTabs();
-                        renderFileListSelection();
+                    // Full path (not uriToName's basename) so nested files
+                    // resolve, and openFile so a not-yet-opened file still
+                    // opens + jumps — the old tabs.get(basename) silently
+                    // no-oped for both cases.
+                    const name = workspaceNameFromUri(uri);
+                    if (!name) return;
+                    void openFile(workspace, name).then(() => {
+                        if (!editor) return;
                         const lineNumber = d.range.start.line + 1;
                         const column = d.range.start.character + 1;
                         editor.revealPositionInCenter({ lineNumber, column });
                         editor.setPosition({ lineNumber, column });
                         editor.focus();
-                    }
+                    }).catch(() => { /* ignore */ });
                 };
                 problemsList.append(li);
             }
@@ -3552,17 +3612,14 @@ async function bootstrap() {
 
                     li.append(icon, msg, loc);
                     li.onclick = () => {
-                        const name = uriToName(model.uri.toString());
-                        const tab = tabs.get(name);
-                        if (tab && editor) {
-                            setEditorModelPreservingViewState(tab);
-                            activeName = name;
-                            renderTabs();
-                            renderFileListSelection();
+                        const name = workspaceNameFromUri(model.uri.toString());
+                        if (!name) return;
+                        void openFile(workspace, name).then(() => {
+                            if (!editor) return;
                             editor.revealPositionInCenter({ lineNumber: mk.startLineNumber, column: mk.startColumn });
                             editor.setPosition({ lineNumber: mk.startLineNumber, column: mk.startColumn });
                             editor.focus();
-                        }
+                        }).catch(() => { /* ignore */ });
                     };
                     problemsList.append(li);
                 }
@@ -9478,9 +9535,19 @@ async function bootstrap() {
     const names = await workspace.list();
     for (const name of names) {
         const uri = monaco.Uri.file(`/workspace/${name}`);
-        if (!monaco.editor.getModel(uri)) {
+        let model = monaco.editor.getModel(uri);
+        if (!model) {
             const text = await workspace.read(name);
-            monaco.editor.createModel(text, languageFor(name), uri);
+            model = monaco.editor.createModel(text, languageFor(name), uri);
+        }
+        // Register in the vscode virtual FS up front so the editor service's
+        // model resolver can open this file for cross-file go-to-definition /
+        // references even if it's never been opened as a tab. The resolver
+        // runs BEFORE our editor opener, so an unregistered target throws
+        // "Unable to resolve nonexistent file". openFile also registers, but
+        // only lazily when a tab opens — too late for a never-opened target.
+        if (!registeredVirtualFsUris.has(uri.toString())) {
+            registerVirtualFile(uri, model.getValue());
         }
     }
     // Stamp every model as "already seen" so an early orphan-file edit (or a
