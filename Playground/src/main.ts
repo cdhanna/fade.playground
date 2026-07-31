@@ -1280,6 +1280,12 @@ interface ProjectOps {
     /** Inline-create a new folder, optionally nested inside
      *  `parentFolder`. Same pattern as `inlineCreateFile`. */
     inlineCreateFolder(parentFolder?: string): void;
+    /** Open the OS file picker and upload the chosen files INTO
+     *  `folderPath` (root-relative). Same ingest pipeline as the root
+     *  "Upload file…" item and drag-drop; the picker + ingest live in the
+     *  bootstrap closure, so this exposes them to the module-scoped folder
+     *  context menu. */
+    uploadToFolder(folderPath: string): void;
 }
 let projectOps: ProjectOps | null = null;
 
@@ -1938,6 +1944,9 @@ function showFolderContextMenu(x: number, y: number, folderPath: string) {
     for (const { label, ext } of NEW_FILE_EXTENSIONS) {
         addItem(label, () => projectOps!.inlineCreateFile(ext, folderPath));
     }
+    // Upload existing files straight into this folder (vs. the plus-icon /
+    // root-area menu, which always drops at the workspace root).
+    addItem('Upload file…', () => projectOps!.uploadToFolder(folderPath));
     // Separator between create-actions and modify-actions.
     const sep = document.createElement('div');
     sep.className = 'source-badge-sep';
@@ -4344,6 +4353,9 @@ async function bootstrap() {
         },
         renameFolder: async (folderPath) => {
             startInlineRename(folderPath, { isFolder: true });
+        },
+        uploadToFolder: (folderPath) => {
+            triggerUploadPicker(folderPath);
         },
         deleteFile: async (name) => {
             if (name === FADE_JSON_NAME) {
@@ -13273,22 +13285,31 @@ async function bootstrap() {
     // Both the menu's "Upload file…" item and the file-list drag-drop
     // handlers route through ingestFiles() so the OPFS write + open-preview
     // + collision-rename behavior stays in one place.
-    async function ingestFiles(files: FileList | File[]): Promise<void> {
+    async function ingestFiles(files: FileList | File[], targetFolder?: string): Promise<void> {
         const list = Array.from(files);
         if (list.length === 0) return;
-        const existing = new Set(await workspace.list());
+        // Destination folder prefix (normalized, no leading/trailing slash).
+        // Empty → workspace root, matching the original behavior. writeBytes
+        // walks + creates intermediate dirs, so the folder need not pre-exist
+        // (it always does when launched from a folder's right-click menu).
+        const prefix = targetFolder ? targetFolder.replace(/^\/+|\/+$/g, '') + '/' : '';
+        const existing = new Set(await workspace.list());  // full slashed paths
         let firstUploaded: string | null = null;
         for (const file of list) {
-            const name = uniqueName(file.name, existing);
-            existing.add(name);
+            const base = uniqueName(file.name, existing, prefix);
+            const path = prefix + base;
+            existing.add(path);
             try {
                 const bytes = new Uint8Array(await file.arrayBuffer());
-                await workspace.writeBytes(name, bytes);
-                if (!firstUploaded) firstUploaded = name;
+                await workspace.writeBytes(path, bytes);
+                if (!firstUploaded) firstUploaded = path;
             } catch (e) {
                 console.error('[fade] upload failed:', file.name, e);
             }
         }
+        // Expand the destination folder so the freshly-uploaded files aren't
+        // hidden under a collapsed row.
+        if (prefix) collapsedFolders.delete(prefix.slice(0, -1));
         await renderFileList(workspace);
         if (firstUploaded) {
             if (isBinaryFileName(firstUploaded)) {
@@ -13299,32 +13320,36 @@ async function bootstrap() {
         }
     }
 
-    function uniqueName(original: string, taken: Set<string>): string {
+    function uniqueName(original: string, taken: Set<string>, prefix = ''): string {
         // Collapse anything OPFS doesn't accept into safe chars so a wild
         // upload name doesn't ENOENT downstream. Same character class the
         // inline-create rename validator enforces (letters, digits, dot,
-        // dash, underscore).
+        // dash, underscore). `taken` holds full slashed paths and `prefix` is
+        // the destination folder ('' for root), so collisions are checked at
+        // the full path; we return the BASENAME (caller prepends `prefix`).
         const sanitized = original.replace(/[^\w.\-]+/g, '_');
-        if (!taken.has(sanitized) && sanitized !== FADE_JSON_NAME) return sanitized;
+        const clashes = (candidate: string) =>
+            taken.has(prefix + candidate) || (prefix + candidate) === FADE_JSON_NAME;
+        if (!clashes(sanitized)) return sanitized;
         const dot = sanitized.lastIndexOf('.');
         const base = dot > 0 ? sanitized.slice(0, dot) : sanitized;
         const ext = dot > 0 ? sanitized.slice(dot) : '';
         let n = 1;
         while (true) {
             const candidate = `${base}-${n}${ext}`;
-            if (!taken.has(candidate) && candidate !== FADE_JSON_NAME) return candidate;
+            if (!clashes(candidate)) return candidate;
             n++;
         }
     }
 
-    function triggerUploadPicker(): void {
+    function triggerUploadPicker(targetFolder?: string): void {
         const input = document.createElement('input');
         input.type = 'file';
         input.multiple = true;
         input.style.display = 'none';
         input.addEventListener('change', () => {
             if (input.files && input.files.length > 0) {
-                void ingestFiles(input.files);
+                void ingestFiles(input.files, targetFolder);
             }
             input.remove();
         });
