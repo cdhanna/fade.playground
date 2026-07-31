@@ -38,7 +38,12 @@ export class ProjectSourceMap {
      *  strip a trailing empty entry (so a file ending in '\n' doesn't count
      *  as an extra line), then re-emit each line with a trailing '\n'. */
     static build(sources: ProjectSourceInput[]): ProjectSourceMap {
-        let joined = '';
+        // Build each file's chunk into an array and join ONCE at the end.
+        // The obvious `joined += line + '\n'` inner loop did one string
+        // concatenation per source line (~3400 for a big project) on every
+        // rebuild — and this runs on the flush push, the reload-button refresh,
+        // and auto-reload. `chunks.join('')` is a single optimized pass.
+        const chunks: string[] = [];
         let total = 0;
         const ranges: FileLineRange[] = [];
         for (const src of sources) {
@@ -47,13 +52,14 @@ export class ProjectSourceMap {
             // line — a final '\n' doesn't yield a phantom empty line. Mirror that.
             if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
             const startLine = total;
-            for (const line of lines) {
-                joined += line + '\n';
-            }
+            // Per-file single concat, guarded so an empty file emits nothing
+            // (matches the old inner loop: 0 lines → 0 appended chars, so the
+            // range stays half-open empty and no phantom '\n' shifts later files).
+            if (lines.length > 0) chunks.push(lines.join('\n'), '\n');
             total += lines.length;
             ranges.push({ name: src.name, startLine, endLine: total });
         }
-        return new ProjectSourceMap(joined, ranges);
+        return new ProjectSourceMap(chunks.join(''), ranges);
     }
 
     /** Reverse map: joined (line, col) → originating file + local line. */

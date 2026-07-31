@@ -321,6 +321,8 @@ class MonoGameHost {
         this.postToIframe({ type: 'bootstrap' });
         await armedPromise;
         this.armed = true;
+        try { this.onArmed?.(); }
+        catch (err) { console.error('[monogame-host] onArmed threw:', err); }
         // Replay the subscription state to the freshly-armed iframe so
         // it knows whether the parent's Debug UI panel currently wants
         // envelopes. Without this, the iframe defaults to subscribed=
@@ -833,6 +835,12 @@ class MonoGameHost {
     // pause/resume/stop/breakpoint-hit messages drained from the canvas
     // DebugSession each frame.
     onDebugEvent?: (event: { id: number; type: string; json: string }) => void;
+
+    // Fired once the iframe has armed (isReady() is now true). main.ts uses
+    // this to pause the warm-tick rAF loop if the editor already had focus when
+    // the boot completed — the focus event that normally drives the pause
+    // fired before there was a live loop to park.
+    onArmed?: () => void;
 
     // Fatal tick-loop error sink. The iframe forwards .NET-side
     // exceptions caught around TickDotNet here so the host page can

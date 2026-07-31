@@ -33,6 +33,17 @@ export const CHANGELOG: ChangelogEntry[] = [
     //         'Initial Release! ',
     //     ],
     // },
+    {
+        version: '0.13.0',
+        date: '2026-07-30',
+        fixed: [
+            'Editor stays responsive while typing in large multi-file projects',
+            'MonoGame projects no longer freeze the editor while you edit or click around',
+        ],
+        changed: [
+            'Semantic highlighting and diagnostics now arrive together, coalesced per keystroke so they keep up with typing',
+        ],
+    },
      {
         version: '0.12.2',
         date: '2026-07-26',

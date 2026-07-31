@@ -52,7 +52,7 @@ export class FadeRunner {
     private opts: RunnerOpts;
     private nextId = 0;
     private pending = new Map<number, (result: any) => void>();
-    private onDiagnostics?: (uri: string, diagnostics: Diagnostic[]) => void;
+    private onDiagnostics?: (uri: string, diagnostics: Diagnostic[], tokens?: Array<{ start: number; end: number; data: number[] }>) => void;
     // Page-side handler registry for the cooperative pump's host-message
     // protocol. Library commands call HostBridge.PostMessage(channel, payload)
     // in C#; the runtime forwards as { type: 'host-message', channel, payload }.
@@ -247,7 +247,7 @@ export class FadeRunner {
         if (msg.type === 'lsp-diagnostics') {
             if (this.onDiagnostics) {
                 const parsed: Diagnostic[] = JSON.parse(msg.diagnostics);
-                this.onDiagnostics(msg.uri, parsed);
+                this.onDiagnostics(msg.uri, parsed, msg.tokens);
             }
             return;
         }
@@ -327,8 +327,16 @@ export class FadeRunner {
         });
     }
 
-    setDocument(uri: string, text: string) {
-        this.worker.postMessage({ type: 'lsp-set', uri, text });
+    // `tokenRanges` (optional): viewport joined-line ranges to also compute
+    // semantic tokens for, IN THE SAME reparse. The worker returns them on the
+    // lsp-diagnostics message, so highlighting rides back with diagnostics in one
+    // round-trip instead of a separate getTokens call that queues behind the next
+    // reparse. See onDiagnostics.
+    setDocument(uri: string, text: string, tokenRanges?: Array<{ start: number; end: number }>) {
+        const msg: { type: string; uri: string; text: string; tokenRanges?: Array<{ start: number; end: number }> } =
+            { type: 'lsp-set', uri, text };
+        if (tokenRanges && tokenRanges.length) msg.tokenRanges = tokenRanges;
+        this.worker.postMessage(msg);
     }
 
     /** Synchronous LSP document check — returns diagnostics without waiting
@@ -877,7 +885,7 @@ export class FadeRunner {
         return { ok: true, bytecode: r.bytecode ?? undefined };
     }
 
-    setDiagnosticsHandler(fn: (uri: string, diagnostics: Diagnostic[]) => void) {
+    setDiagnosticsHandler(fn: (uri: string, diagnostics: Diagnostic[], tokens?: Array<{ start: number; end: number; data: number[] }>) => void) {
         this.onDiagnostics = fn;
     }
 }

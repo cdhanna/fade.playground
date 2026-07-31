@@ -2598,26 +2598,21 @@ async function bootstrap() {
         }
     }
 
-    async function applyProjectSemanticTokensInner(forceName?: string | null): Promise<void> {
+    // Viewport padding: the requested window covers a normal source-sized file
+    // from any scroll position (no flicker); the scroll listener re-fetches for a
+    // very large single file.
+    const TOKEN_PAD = 400;
+
+    type TokenTarget = {
+        name: string; model: monaco.editor.ITextModel;
+        fileStart: number; fileEnd: number; jStart: number; jEnd: number;
+    };
+
+    // Collect the visible project files' viewport windows as joined-line targets.
+    function collectTokenTargets(forceName?: string | null): TokenTarget[] {
         const map = projectSourceMap;
-        if (!map) return;
-
-        // UNIFIED SINGLE PASS: tokens come from the SAME joined-project doc the
-        // reparse just built — already lexed+parsed+scope-resolved on the worker.
-        // We read it back viewport-scoped (getTokens on PROJECT_LSP_URI), which
-        // only re-classifies+serializes the visible slice of the cached doc — no
-        // separate per-file re-lex competing for the single worker thread. This
-        // runs on the diagnostics-settle, so coloring and squiggles land together
-        // from one pass. The padded window covers a normal source-sized file from
-        // any scroll position (no flicker); the scroll listener re-fetches for a
-        // very large single file.
-        const PAD = 400;
-
-        type Target = {
-            name: string; model: monaco.editor.ITextModel;
-            fileStart: number; fileEnd: number; jStart: number; jEnd: number;
-        };
-        const targets: Target[] = [];
+        if (!map) return [];
+        const targets: TokenTarget[] = [];
         const seen = new Set<string>();
         const pushTarget = (name: string, model: monaco.editor.ITextModel, ed: monaco.editor.ICodeEditor | null) => {
             if (seen.has(name) || model.isDisposed()) return;
@@ -2635,15 +2630,14 @@ async function bootstrap() {
                     vpTop = Math.min(vpTop, v.startLineNumber - 1); // 1-based → 0-based
                     vpBot = Math.max(vpBot, v.endLineNumber);
                 }
-                localStart = Math.max(0, vpTop - PAD);
-                localEnd = Math.min(fileLines, vpBot + PAD);
+                localStart = Math.max(0, vpTop - TOKEN_PAD);
+                localEnd = Math.min(fileLines, vpBot + TOKEN_PAD);
             }
             targets.push({
                 name, model, fileStart: r.startLine, fileEnd: r.endLine,
                 jStart: r.startLine + localStart, jEnd: r.startLine + localEnd,
             });
         };
-
         // forceName (tab-activation refresh) → whole file, no viewport, since the
         // editor's scroll state may not be settled yet.
         if (forceName) {
@@ -2656,41 +2650,79 @@ async function bootstrap() {
             const name = projectFileNameFromUri(m.uri.toString());
             if (name && isModelVisible(m)) pushTarget(name, m, ed);
         }
-        if (targets.length === 0) return; // nothing on screen needs project tokens
+        return targets;
+    }
 
+    // The joined-line ranges to request tokens for ALONGSIDE the reparse (unified
+    // single pass) — sent with the doc push; the worker returns their tokens on
+    // the diagnostics message, so highlighting needs no separate getTokens call.
+    function collectVisibleTokenRanges(): Array<{ start: number; end: number }> {
+        return collectTokenTargets().map((t) => ({ start: t.jStart, end: t.jEnd }));
+    }
+
+    // Decode a delta-encoded joined-token stream (re-based from line 0 — the
+    // first token's deltaLine is its absolute joined line) for [fileStart,
+    // fileEnd), map to the file's local coords, and apply as decorations. Shared
+    // by the unified-response path and the getTokens (scroll/tab) path.
+    function decodeAndApplyTokens(model: monaco.editor.ITextModel, fileStart: number, fileEnd: number, data: number[]): void {
+        const decos: monaco.editor.IModelDeltaDecoration[] = [];
+        let joinedLine = 0;
+        let ch = 0;
+        for (let i = 0; i + 4 < data.length; i += 5) {
+            const dLine = data[i];
+            const dChar = data[i + 1];
+            if (dLine > 0) { joinedLine += dLine; ch = dChar; }
+            else { ch += dChar; }
+            if (joinedLine < fileStart || joinedLine >= fileEnd) continue;
+            const len = data[i + 2];
+            const typeIdx = data[i + 3];
+            const localLine = joinedLine - fileStart;
+            decos.push({
+                range: new monaco.Range(localLine + 1, ch + 1, localLine + 1, ch + 1 + len),
+                options: { inlineClassName: 'fade-token-' + (tokenTypes[typeIdx] ?? 'unknown') },
+            });
+        }
+        if (model.isDisposed()) return;
+        const uriKey = model.uri.toString();
+        const sig = decoSignature(decos);
+        if (tokenSigByUri.get(uriKey) === sig) return;
+        tokenSigByUri.set(uriKey, sig);
+        decorationsByUri.set(uriKey, model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], decos));
+    }
+
+    // Apply the token slices that rode back on the unified lsp-set response. Each
+    // carries its joined range + delta-encoded data; map it to the owning file.
+    function applyUnifiedTokens(tokenRanges?: Array<{ start: number; end: number; data: number[] }>): void {
+        const map = projectSourceMap;
+        if (!map || !tokenRanges) return;
+        for (const tr of tokenRanges) {
+            const r = map.ranges.find((rr) => tr.start >= rr.startLine && tr.start < rr.endLine);
+            const model = r ? monaco.editor.getModel(monaco.Uri.file(`/workspace/${r.name}`)) : null;
+            if (!r || !model || model.isDisposed()) continue;
+            decodeAndApplyTokens(model, r.startLine, r.endLine, tr.data);
+        }
+    }
+
+    // The getTokens-round-trip path, used only for SCROLL and tab-activation (not
+    // per keystroke — that rides the unified lsp-set response). These are
+    // infrequent, so the extra worker call doesn't contend with rapid reparses.
+    async function applyProjectSemanticTokensInner(forceName?: string | null): Promise<void> {
+        const targets = collectTokenTargets(forceName);
         for (const t of targets) {
             if (t.model.isDisposed()) continue;
+            // Scroll path only: if the padded window already spans the whole
+            // file, the unified lsp-set response covers it every reparse —
+            // scrolling reveals nothing new, so skip the worker round-trip
+            // entirely (it used to fire a full ~150ms getTokens per auto-scroll
+            // during a typing burst, contending with the reparse). Tab
+            // activation (forceName) still fetches: switching tabs pushes no
+            // reparse, so the newly-shown file may have no current tokens.
+            if (!forceName && t.jStart <= t.fileStart && t.jEnd >= t.fileEnd) continue;
             const _s = performance.now();
             const tokens = await lsp.getTokens(PROJECT_LSP_URI, t.jStart, t.jEnd);
             const _ms = performance.now() - _s;
             if (_ms > 60) console.debug(`[fade-perf] getTokens ${t.name} joined=${t.jStart}-${t.jEnd} → ${_ms.toFixed(0)}ms tokens=${tokens.length / 5 | 0}`);
-
-            // Range tokens are delta-encoded re-based from line 0 (first token's
-            // deltaLine is its absolute joined line), so decode accumulates from
-            // 0, then map joined → this file's local coords.
-            const decos: monaco.editor.IModelDeltaDecoration[] = [];
-            let joinedLine = 0;
-            let ch = 0;
-            for (let i = 0; i + 4 < tokens.length; i += 5) {
-                const dLine = tokens[i];
-                const dChar = tokens[i + 1];
-                if (dLine > 0) { joinedLine += dLine; ch = dChar; }
-                else { ch += dChar; }
-                if (joinedLine < t.fileStart || joinedLine >= t.fileEnd) continue;
-                const len = tokens[i + 2];
-                const typeIdx = tokens[i + 3];
-                const localLine = joinedLine - t.fileStart;
-                decos.push({
-                    range: new monaco.Range(localLine + 1, ch + 1, localLine + 1, ch + 1 + len),
-                    options: { inlineClassName: 'fade-token-' + (tokenTypes[typeIdx] ?? 'unknown') },
-                });
-            }
-            if (t.model.isDisposed()) continue;
-            const uriKey = t.model.uri.toString();
-            const sig = decoSignature(decos);
-            if (tokenSigByUri.get(uriKey) === sig) continue;
-            tokenSigByUri.set(uriKey, sig);
-            decorationsByUri.set(uriKey, t.model.deltaDecorations(decorationsByUri.get(uriKey) ?? [], decos));
+            decodeAndApplyTokens(t.model, t.fileStart, t.fileEnd, tokens);
         }
     }
 
@@ -3262,53 +3294,30 @@ async function bootstrap() {
         source: d.source ?? 'fade',
     });
 
-    // Coalesced project-doc diagnostics rendering — see the handler below.
-    // Runs the two O(project) main-thread costs (semantic-token decoration +
-    // Problems rebuild) at most once per debounce window, no matter how many
-    // diagnostics pushes arrive (the completion provider can trigger one per
-    // keystroke on a large multi-file project). [fade-perf] logs the cost so
-    // we can confirm which part dominates.
-    let diagRenderScheduled = false;
-    let diagRenderRunning = false;
-    async function runProjectDiagRender() {
-        // Only one in flight — applyProjectSemanticTokens awaits a worker
-        // getTokens round-trip, so without this guard rapid diagnostics would
-        // stack concurrent getTokens calls (each queued behind the worker),
-        // which is exactly the backlog that produced multi-second stalls.
-        if (diagRenderRunning) { diagRenderScheduled = true; return; }
-        diagRenderRunning = true;
-        diagRenderScheduled = false;
-        try {
-            const t0 = performance.now();
-            await applyProjectSemanticTokens();
-            const t1 = performance.now();
-            renderProblems();
-            const t2 = performance.now();
-            if (t2 - t0 > 6) {
-                console.debug(`[fade-perf] diag-render tokens=${(t1 - t0).toFixed(1)}ms problems=${(t2 - t1).toFixed(1)}ms`);
-            }
-        } finally {
-            diagRenderRunning = false;
-            // A render was requested while we were running — run once more.
-            if (diagRenderScheduled) {
-                diagRenderScheduled = false;
-                window.setTimeout(() => void runProjectDiagRender(), 120);
-            }
-        }
-    }
+    // Coalesced Problems-panel rebuild. Semantic tokens no longer render here —
+    // they ride back on the unified lsp-set response (applyUnifiedTokens in the
+    // handler), so this only rebuilds the Problems panel. renderProblems is
+    // synchronous main-thread work, debounced so a burst of diagnostics pushes
+    // rebuilds the panel at most once per window.
+    let problemsRenderScheduled = false;
     function scheduleProjectDiagRender() {
-        if (diagRenderScheduled || diagRenderRunning) { diagRenderScheduled = true; return; }
-        diagRenderScheduled = true;
-        window.setTimeout(() => void runProjectDiagRender(), 120);
+        if (problemsRenderScheduled) return;
+        problemsRenderScheduled = true;
+        window.setTimeout(() => {
+            problemsRenderScheduled = false;
+            renderProblems();
+        }, 120);
     }
 
-    lsp.setDiagnosticsHandler((uri, diagnostics) => {
+    lsp.setDiagnosticsHandler((uri, diagnostics, tokens) => {
         // Multi-source fan-out: when the LSP pushed diagnostics for the
         // joined project doc, bucket each entry by origin file (via
         // projectSourceMap.fromProject) and apply markers per-file. Files
         // listed in fade.json:sources but with NO diagnostics still get
         // their markers cleared — pre-seed empty buckets for every member.
         if (uri === PROJECT_LSP_URI && projectSourceMap) {
+            // The outstanding reparse just landed — the throttle slot is free.
+            projectReparseInFlight = false;
             const map = projectSourceMap;
             const byFile = new Map<string, Diagnostic[]>();
             for (const name of map.fileNames()) byFile.set(name, []);
@@ -3327,16 +3336,22 @@ async function bootstrap() {
                 }
                 diagnosticsByUri.set(fileUri, diags);
             }
-            // Semantic-token decoration (worker getTokens + decode the whole
-            // joined token stream + deltaDecorations) and the Problems-panel
-            // rebuild are O(project) main-thread work. On a large multi-file
-            // project the completion provider's per-keystroke setDocument makes
-            // the LSP push diagnostics per keystroke — running these per
-            // keystroke made the editor crawl. Coalesce them behind a debounce.
+            // Unified single pass: the viewport tokens were computed in the same
+            // reparse and rode back on this message — apply them directly (decode
+            // + deltaDecorations), no separate getTokens round-trip. The
+            // Problems-panel rebuild is the only remaining O(project) main-thread
+            // cost here, coalesced behind a debounce.
+            applyUnifiedTokens(tokens);
             scheduleProjectDiagRender();
             const wasBlocked = lastBlockedByErrors;
             refreshRunButtons();
             if (wasBlocked && !lastBlockedByErrors) refreshDebounce();
+            // Edits arrived while this reparse was in flight — push the latest
+            // text now (coalesced into a single follow-up reparse).
+            if (projectReparsePending) {
+                projectReparsePending = false;
+                rebuildAndPushProjectDoc();
+            }
             return;
         }
 
@@ -3674,6 +3689,14 @@ async function bootstrap() {
     // behaves identically to the pre-multi-source code.
     let projectSourceMap: ProjectSourceMap | null = null;
     let lastPushedProjectText: string | null = null;
+    // See rebuildAndPushProjectDoc: at most one project reparse outstanding.
+    let projectReparseInFlight = false;
+    let projectReparsePending = false;
+    let projectReparseSentAt = 0;
+    // If a reparse response is ever lost (worker error, dropped message), don't
+    // let the in-flight flag wedge every future reparse — treat it as free after
+    // this long. Comfortably above any real reparse (~100-150ms on big files).
+    const PROJECT_REPARSE_STALE_MS = 4000;
 
     // Set after the Help panel is mounted (further down in bootstrap). The
     // project-type-change branch below uses this to re-fetch the command
@@ -3731,6 +3754,30 @@ async function bootstrap() {
     // pushed, skip the postMessage round-trip entirely. Returns true when a
     // push happened (callers can use this to know diagnostics will follow).
     function rebuildAndPushProjectDoc(force = false): boolean {
+        // Single-reparse-in-flight throttle, checked BEFORE the O(project)
+        // rebuild. The worker reparses the whole joined doc per lsp-set
+        // (~100-150ms on big projects). If we pushed on every keystroke,
+        // reparses queued back-to-back on the worker and their responses
+        // (markers + token decoration) queued on the main thread — so a click
+        // landing after a typing burst waited behind that backlog and the
+        // cursor moved sluggishly. Instead we keep at most ONE project reparse
+        // outstanding: while one is in flight, later edits just mark
+        // `projectReparsePending`, and when the response lands we rebuild + push
+        // the LATEST text (coalescing the whole burst into one-reparse-per-
+        // reparse). Returning here also SKIPS the readProjectSourcesSync +
+        // ProjectSourceMap.build below — that O(project) rebuild was running on
+        // every debounced flush (per typing micro-pause) even when the push was
+        // going to be deferred. Just as important: it keeps `projectSourceMap`
+        // matched to the in-flight reparse, so the response handler buckets that
+        // reparse's diagnostics/tokens through the SAME line map that produced
+        // them. (Rebuilding eagerly here let the map race ahead of the in-flight
+        // text, so markers landed on the wrong file/line when lines were added
+        // mid-flight.) `force` bypasses the defer so structural re-pushes always
+        // go through.
+        if (!force && projectReparseInFlight && Date.now() - projectReparseSentAt < PROJECT_REPARSE_STALE_MS) {
+            projectReparsePending = true;
+            return false;
+        }
         const inputs = readProjectSourcesSync();
         if (inputs.length === 0) {
             projectSourceMap = null;
@@ -3744,7 +3791,12 @@ async function bootstrap() {
         projectSourceMap = map;
         if (!force && lastPushedProjectText === map.joined) return false;
         lastPushedProjectText = map.joined;
-        runner.setDocument(PROJECT_LSP_URI, map.joined);
+        projectReparseInFlight = true;
+        projectReparseSentAt = Date.now();
+        // Unified single pass: ask for the visible viewport's tokens in the same
+        // reparse so highlighting rides back with diagnostics (no separate
+        // getTokens round-trip that queues behind the next reparse).
+        runner.setDocument(PROJECT_LSP_URI, map.joined, collectVisibleTokenRanges());
         return true;
     }
 
@@ -4526,7 +4578,7 @@ async function bootstrap() {
         return ProjectSourceMap.build(inputs).joined;
     }
 
-    async function refreshTests() {
+    async function refreshTests(force = false) {
         const source = await getProjectSource();
         if (!source) {
             testEntries = [];
@@ -4548,12 +4600,43 @@ async function bootstrap() {
         // whether the LSP has swapped command sets. Route through the
         // canvas-side bridge for monogame so the test manifest reflects
         // the exact compile env the run will use.
+        //
+        // BUT: that bridge compiles the WHOLE project inside the same-origin
+        // preview iframe, which shares the parent's main-thread event loop — a
+        // ~1.5s compile on a big project freezes the editor (cursor + typing).
+        // Since flushLspDocs re-runs discovery on every edit, that fired a full
+        // iframe compile ~1.5s after each pause even when the user was just
+        // editing. Only pay it when the Tests panel is actually visible;
+        // otherwise defer until it opens (see the visibility hook below). The
+        // worker path (web) compiles off-thread, so it doesn't need gating.
+        if (currentProject?.type === 'monogame') {
+            // Skip the shared-thread iframe compile while the user is actively
+            // in the editor (focus) OR isn't looking at tests (panel hidden).
+            // Deferred discovery runs on editor blur or when the Tests panel
+            // opens — see the hooks below.
+            if (!force && (editor?.hasTextFocus() || !isTestsPanelVisible())) {
+                testsDiscoveryDeferred = true;
+                return;
+            }
+            testsDiscoveryDeferred = false;
+        }
         const list = currentProject?.type === 'monogame'
             ? await monoGameHost.listTests(source)
             : await runner.listTests(source);
         testEntries = list.map((t) => ({ ...t, status: 'idle' as const }));
         renderTests();
     }
+
+    // Is the Tests dock panel currently the visible tab in its group? Used to
+    // gate the expensive monogame in-iframe discovery compile. Defensive: if
+    // the panel isn't adopted yet, treat as not-visible (defer discovery).
+    function isTestsPanelVisible(): boolean {
+        try { return !!dockApi.getPanel('tests')?.api.isVisible; }
+        catch { return false; }
+    }
+    // Set when monogame discovery was skipped because the Tests panel was
+    // hidden; the visibility hook runs the deferred discovery when it opens.
+    let testsDiscoveryDeferred = false;
 
     // Any error-severity diagnostic in any current-project source file (or
     // a schema error in fade.json) gates the Run / Debug / Export buttons
@@ -4958,7 +5041,7 @@ async function bootstrap() {
     });
 
     testsRunAllBtn.addEventListener('click', runAllTests);
-    testsRefreshBtn.addEventListener('click', refreshTests);
+    testsRefreshBtn.addEventListener('click', () => void refreshTests(true));
     // Re-list on every doc push so the badge updates as the user types tests.
     const refreshDebounce = (() => {
         let timer: number | undefined;
@@ -5933,6 +6016,19 @@ async function bootstrap() {
         // adoption pass.
         setTimeout(() => { wireDebugUiSubscription(); }, 100);
     }
+
+    // Run deferred monogame test discovery when the Tests panel becomes
+    // visible (refreshTests skips the expensive in-iframe compile while the
+    // panel is hidden — see the gate there). Same adoption-retry dance.
+    function wireTestsVisibility(): boolean {
+        const panel = dockApi.getPanel('tests');
+        if (!panel) return false;
+        panel.api.onDidVisibilityChange(() => {
+            if (panel.api.isVisible && testsDiscoveryDeferred) void refreshTests();
+        });
+        return true;
+    }
+    if (!wireTestsVisibility()) setTimeout(() => { wireTestsVisibility(); }, 100);
 
     monoGameHost.onDebugUiFrame = (env, rawJson) => {
         debugUiIframeCount++;
@@ -9195,7 +9291,15 @@ async function bootstrap() {
     let mgTickPaused = false;
     function pauseMgTick() {
         if (currentProject?.type !== 'monogame') return;
-        if (!runActive && !debugSessionActive) return;
+        // Pause whenever the iframe is live — NOT only after Run. The MonoGame
+        // runtime boots eagerly (module-reload preview) and warm-ticks its rAF
+        // loop before the user ever presses Run; that same-origin iframe shares
+        // the parent's event loop, so its TickDotNet() + Mono-WASM GC compete
+        // with Monaco and intermittently freeze the cursor/typing mid-edit. The
+        // old `if (!runActive && !debugSessionActive) return` skipped the pause
+        // in exactly that pre-Run window. isReady() gates it to "there's a live
+        // loop to park" (pauseTick is a no-op otherwise).
+        if (!monoGameHost.isReady()) return;
         if (mgTickPaused) return;
         // Live-session guard: halting the iframe also halts the game-
         // frame stream and the Debug UI envelope relay that observers
@@ -9209,16 +9313,33 @@ async function bootstrap() {
         }
         mgTickPaused = true;
         monoGameHost.pauseTick();
-        updateGameStatus('paused');
+        // Only reflect paused/running in the status label during a real run
+        // session — pre-Run the warm tick is an implementation detail the user
+        // shouldn't see surface as "Paused".
+        if (runActive || debugSessionActive) updateGameStatus('paused');
     }
     function resumeMgTick() {
         if (!mgTickPaused) return;
         mgTickPaused = false;
         monoGameHost.resumeTick();
-        updateGameStatus('running');
+        if (runActive || debugSessionActive) updateGameStatus('running');
     }
     editor.onDidFocusEditorWidget(pauseMgTick);
     editor.onDidBlurEditorWidget(resumeMgTick);
+    // Focus leaving the editor is a safe moment to pay the deferred monogame
+    // test-discovery compile (the editor isn't taking keystrokes right now).
+    editor.onDidBlurEditorWidget(() => {
+        if (testsDiscoveryDeferred && currentProject?.type === 'monogame' && isTestsPanelVisible()) {
+            void refreshTests();
+        }
+    });
+    // The iframe often finishes booting (via background test discovery, etc.)
+    // AFTER the editor already grabbed focus — so no focus event is pending to
+    // trigger the pause, and the fresh warm-tick loop would run unpaused,
+    // competing with the editor. Pause it on arm if the editor holds focus now.
+    monoGameHost.onArmed = () => {
+        if (editor?.hasTextFocus()) pauseMgTick();
+    };
 
     // (Earlier attempt to reparent the context-menu container lived here
     // — turned out vscode-vscode-api creates the menu inside a shadow root
