@@ -37,10 +37,14 @@ export const CHANGELOG: ChangelogEntry[] = [
         version: '0.13.0',
         date: 'Unreleased',
         fixed: [
-            'Increased editor performance'
+            'Increased editor performance',
+            'Casings on variable type aheadds',
+            'Clicking on problems focuses on source',
+            'Double clicking on sigiled variabled selects full variable'
         ],
         added: [
-            'Can upload assets directly into folder'
+            'Can upload assets directly into folder',
+            'History forward and backwards navigation'
         ]
     },
      {

@@ -32,16 +32,24 @@ export interface CtrlClickResolution {
     hasProgramDefinition: boolean;
     /** Canonical built-in command name resolved from the hover, or null. */
     commandName: string | null;
+    /** True when the word is a documented language keyword (`if`, `for`,
+     *  `dim`, a primitive-type name, …). ONLY commands and keywords route to
+     *  the docs — an unrecognized word (an unresolved variable/function/label,
+     *  or a typo) must NOT trigger a help lookup. */
+    isKeyword: boolean;
     /** The word under the cursor, or null when there isn't one. */
     word: string | null;
 }
 
 /** Decide what a Ctrl/Cmd-click should do, given what resolution found at
  *  the clicked position. Priority order matters: an in-program definition
- *  always wins over the docs so go-to-definition is never shadowed. */
+ *  always wins over the docs so go-to-definition is never shadowed. A word
+ *  that is neither a command nor a keyword falls through to `none` — variables,
+ *  functions and labels never start a help search, even when the LSP didn't
+ *  return a definition for them (e.g. an unresolved reference). */
 export function resolveCtrlClickAction(r: CtrlClickResolution): CtrlClickAction {
     if (r.hasProgramDefinition) return 'definition';
     if (r.commandName) return 'command-doc';
-    if (r.word) return 'keyword-doc';
+    if (r.isKeyword) return 'keyword-doc';
     return 'none';
 }

@@ -124,8 +124,9 @@ const EMPTY_CONTENT_PLAN: MonoGameContentPlan = {
     defaultCompression: 'auto',
     entries: [],
 };
-import { mountHelpPanel, extractCommandNameFromHover } from './help';
+import { mountHelpPanel, extractCommandNameFromHover, findKeywordDocHeading } from './help';
 import { resolveCtrlClickAction } from './ctrl-click';
+import { NavigationHistory, type NavLocation } from './navigation-history';
 import { AssetSyncCache, isAssetNotRegisteredError } from './asset-sync-cache';
 import type { PendingAsset } from './asset-sync-cache';
 import { joinedBreakpointLines } from './breakpoint-sync';
@@ -4184,6 +4185,8 @@ async function bootstrap() {
         } catch (e: any) {
             return e?.message ?? String(e);
         }
+        nav.rename(oldName, newName); // keep back/forward pointing at the file
+
         // Monaco models are immutable on URI — swap by disposing the
         // old model and creating a new one with the new URI. Any
         // decorations + markers reattach via the polling loop's next
@@ -4264,6 +4267,8 @@ async function bootstrap() {
         } catch (e: any) {
             return e?.message ?? String(e);
         }
+        nav.rename(oldPath, newPath); // keep back/forward pointing at moved files
+
         // Update fade.json: any source matching oldPath exactly, or
         // sitting under oldPath/, gets rewritten to its new home.
         await mutateManifest((p) => {
@@ -4445,6 +4450,9 @@ async function bootstrap() {
                 alert('Delete failed: ' + (e?.message ?? e));
                 return;
             }
+            // Drop navigation-history entries for the now-gone file so Back /
+            // Forward never try to open it.
+            nav.forget(name);
             // If the deleted file was a listed source, remove it from
             // fade.json so we don't trip the missing-source error. For
             // folder deletes, drop every source under the folder too.
@@ -9273,6 +9281,13 @@ async function bootstrap() {
         // toggles a breakpoint (see the onMouseDown handler), so don't also
         // select the whole line when the line number is clicked.
         selectOnLineNumbers: false,
+        // Double-click word selection uses `wordSeparators` (NOT the language
+        // wordPattern), and Monaco's default lists `#` and `$` as separators —
+        // so double-clicking `aNumber#` / `aString$` selected only the base
+        // name and dropped the type sigil (annoying for copy/paste). Drop `#`
+        // and `$` from the separators so a sigil'd variable selects whole.
+        // (This is the usual set minus those two.)
+        wordSeparators: '`~!@%^&*()-=+[{]}\\|;:\'",.<>/?',
     } as monaco.editor.IStandaloneEditorConstructionOptions);
 
     // Reactively re-apply editor settings whenever they change (user toggles
@@ -10145,6 +10160,118 @@ async function bootstrap() {
     // Direct-mode shortcuts, independent of the selected default.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyR, () => void launchInMode('run'));
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD, () => void launchInMode('debug'));
+
+    // ─── Navigation history (go back / forward) ─────────────────────────────
+    // Browser-style back/forward across jumps (go-to-definition, references,
+    // Problems clicks) and file switches. We can't use vscode's IHistoryService
+    // (our custom standalone-editor + tabs bypass the workbench editor layer),
+    // so we drive a small NavigationHistory ourselves off the editor's cursor
+    // and model-change events.
+    const nav = new NavigationHistory();
+    // Suppress recording while WE drive the editor (back/forward navigation),
+    // so navigating to a history entry doesn't record a fresh one.
+    let navSuppressed = 0;
+    const NAV_VISIT_DEBOUNCE_MS = 60;
+
+    function currentNavLocation(): NavLocation | null {
+        if (!editor || !activeName) return null;
+        const pos = editor.getPosition();
+        if (!pos) return null;
+        return { name: activeName, lineNumber: pos.lineNumber, column: pos.column };
+    }
+
+    // Debounced so a burst of cursor/model events during one navigation (open
+    // file → restore view-state → reveal target) collapses into a single visit
+    // at the final settled position, and so typing doesn't spam the history.
+    let navVisitTimer: number | undefined;
+    function scheduleNavVisit(): void {
+        if (navVisitTimer != null) window.clearTimeout(navVisitTimer);
+        navVisitTimer = window.setTimeout(() => {
+            navVisitTimer = undefined;
+            if (navSuppressed) return;
+            const loc = currentNavLocation();
+            if (loc) nav.visit(loc);
+        }, NAV_VISIT_DEBOUNCE_MS);
+    }
+
+    async function navigateToLocation(loc: NavLocation): Promise<void> {
+        navSuppressed++;
+        try {
+            await openFile(workspace, loc.name);
+            if (editor) {
+                const p = { lineNumber: loc.lineNumber, column: loc.column };
+                editor.revealPositionInCenter(p, monaco.editor.ScrollType.Smooth);
+                editor.setPosition(p);
+                editor.focus();
+            }
+        } catch (e) {
+            console.warn('[nav] navigate failed', e);
+        } finally {
+            // Release AFTER the debounced visit this navigation scheduled would
+            // have fired (and been skipped), so it doesn't record the jump.
+            window.setTimeout(() => { navSuppressed = Math.max(0, navSuppressed - 1); },
+                NAV_VISIT_DEBOUNCE_MS + 40);
+        }
+    }
+
+    function navBack(): void { const l = nav.goBack(); if (l) void navigateToLocation(l); }
+    function navForward(): void { const l = nav.goForward(); if (l) void navigateToLocation(l); }
+
+    editor.onDidChangeCursorPosition(() => scheduleNavVisit());
+    editor.onDidChangeModel(() => scheduleNavVisit());
+
+    // ⌘[ / ⌘] (Ctrl+[ / Ctrl+] on Win/Linux). NOTE: overrides the editor's
+    // default outdent/indent on these chords. This is a stopgap until the
+    // planned keybinding editor in Settings makes it user-configurable.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.BracketLeft, () => navBack());
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.BracketRight, () => navForward());
+    const navIsMac = /mac|iphone|ipad/i.test(navigator.userAgent) || /mac/i.test(navigator.platform ?? '');
+    const navBackKeyLabel = navIsMac ? '⌘[' : 'Ctrl+[';
+    const navFwdKeyLabel = navIsMac ? '⌘]' : 'Ctrl+]';
+
+    // Visual cue: back/forward arrows overlaid at the editor's top-right. Shown
+    // greyed until there's somewhere to go, so the affordance is always visible.
+    const navWidget = document.createElement('div');
+    navWidget.className = 'fade-nav-history';
+    navWidget.style.cssText = 'display:flex;gap:2px;margin:4px 14px 0 0;opacity:.55;transition:opacity .1s;';
+    navWidget.addEventListener('mouseenter', () => { navWidget.style.opacity = '1'; });
+    navWidget.addEventListener('mouseleave', () => { navWidget.style.opacity = '.55'; });
+    const mkNavBtn = (icon: string, title: string, on: () => void) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.title = title;
+        b.className = 'fade-nav-btn';
+        b.style.cssText = 'display:flex;align-items:center;justify-content:center;width:22px;height:22px;'
+            + 'padding:0;border:none;border-radius:4px;background:var(--vscode-editorWidget-background,#252526);'
+            + 'color:var(--vscode-foreground,#ccc);cursor:pointer;';
+        b.innerHTML = `<span class="codicon codicon-${icon}"></span>`;
+        b.addEventListener('mousedown', (e) => e.preventDefault()); // keep editor focus
+        b.addEventListener('click', on);
+        return b;
+    };
+    const navBackBtn = mkNavBtn('arrow-left', `Go Back (${navBackKeyLabel})`, navBack);
+    const navFwdBtn = mkNavBtn('arrow-right', `Go Forward (${navFwdKeyLabel})`, navForward);
+    navWidget.append(navBackBtn, navFwdBtn);
+    editor.addOverlayWidget({
+        getId: () => 'fade.navHistory',
+        getDomNode: () => navWidget,
+        getPosition: () => ({ preference: monaco.editor.OverlayWidgetPositionPreference.TOP_RIGHT_CORNER }),
+    });
+    function updateNavButtons(): void {
+        const back = nav.canGoBack();
+        const fwd = nav.canGoForward();
+        navBackBtn.disabled = !back;
+        navFwdBtn.disabled = !fwd;
+        navBackBtn.style.opacity = back ? '1' : '.35';
+        navFwdBtn.style.opacity = fwd ? '1' : '.35';
+        navBackBtn.style.cursor = back ? 'pointer' : 'default';
+        navFwdBtn.style.cursor = fwd ? 'pointer' : 'default';
+    }
+    nav.onChange = updateNavButtons;
+    // Seed the currently-open file so the first navigation can go Back to it.
+    const navSeed = currentNavLocation();
+    if (navSeed) nav.visit(navSeed);
+    updateNavButtons();
 
     // Launch-mode + auto-hot-reload dropdown (mirrors the View menu pattern).
     const launchModeDebugItem = document.getElementById('launch-mode-debug')!;
@@ -12927,6 +13054,11 @@ async function bootstrap() {
         if (e.target?.type !== monaco.editor.MouseTargetType.CONTENT_TEXT) return;
         const pos = e.target.position;
         if (!pos) return;
+        // Record the click site NOW (synchronously, before the jump) so Back
+        // returns to the call site. The built-in go-to-definition jumps on
+        // mouse-up almost immediately, which would otherwise coalesce the click
+        // position out of the debounced history visit.
+        if (activeName) nav.visit({ name: activeName, lineNumber: pos.lineNumber, column: pos.column });
         // Same `editor!` pattern as the gutter-glyph onMouseDown above
         // — TS can't narrow the outer let-binding through the closure
         // but at runtime addAction etc. already established editor is
@@ -12946,8 +13078,13 @@ async function bootstrap() {
 
         const name = hasProgramDefinition ? null : await resolveCommandAtPosition(model, pos);
         const word = model.getWordAtPosition(pos)?.word ?? null;
+        // Only commands and keywords look up help. A variable/function/label
+        // that didn't resolve to a definition (unresolved reference, or a stale
+        // parse) must NOT fall through to a help search — gate the docs path on
+        // the word being an actual documented keyword.
+        const isKeyword = !!(word && findKeywordDocHeading(word));
 
-        const action = resolveCtrlClickAction({ hasProgramDefinition, commandName: name, word });
+        const action = resolveCtrlClickAction({ hasProgramDefinition, commandName: name, isKeyword, word });
         // Built-in go-to-definition already handles the jump.
         if (action === 'definition' || action === 'none') return;
         // A resolved command opens its help entry; if it's not in the

@@ -10,6 +10,7 @@ describe('resolveCtrlClickAction', () => {
         expect(resolveCtrlClickAction({
             hasProgramDefinition: true,
             commandName: null,
+            isKeyword: false,
             word: 'myVariable',
         })).toBe('definition');
     });
@@ -21,6 +22,7 @@ describe('resolveCtrlClickAction', () => {
         expect(resolveCtrlClickAction({
             hasProgramDefinition: true,
             commandName: 'print',
+            isKeyword: false,
             word: 'print',
         })).toBe('definition');
     });
@@ -31,6 +33,7 @@ describe('resolveCtrlClickAction', () => {
         expect(resolveCtrlClickAction({
             hasProgramDefinition: false,
             commandName: 'position sprite',
+            isKeyword: false,
             word: 'position',
         })).toBe('command-doc');
     });
@@ -41,14 +44,29 @@ describe('resolveCtrlClickAction', () => {
         expect(resolveCtrlClickAction({
             hasProgramDefinition: false,
             commandName: null,
+            isKeyword: true,
             word: 'function',
         })).toBe('keyword-doc');
+    });
+
+    // The behavior this file guards: an UNRESOLVED variable/function/label —
+    // no definition, not a command, not a keyword — must NOT fall through to a
+    // help search. It's `none`, so Ctrl+click does nothing rather than popping
+    // the help panel open on a plain identifier.
+    it('does nothing for an unrecognized word (unresolved variable/function/label)', () => {
+        expect(resolveCtrlClickAction({
+            hasProgramDefinition: false,
+            commandName: null,
+            isKeyword: false,
+            word: 'someLocalVar',
+        })).toBe('none');
     });
 
     it('does nothing when there is no word and nothing resolves', () => {
         expect(resolveCtrlClickAction({
             hasProgramDefinition: false,
             commandName: null,
+            isKeyword: false,
             word: null,
         })).toBe('none');
     });
