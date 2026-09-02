@@ -53,6 +53,29 @@
                 "pattern": "^[\\w.\\-/]+\\.(fbasic|fb)$"
             },
             "minItems": 1
+        },
+        "settings": {
+            "type": "object",
+            "description": "Optional runtime settings.",
+            "additionalProperties": false,
+            "properties": {
+                "gc": {
+                    "type": "object",
+                    "description": "Garbage-collector tuning for the VM.",
+                    "additionalProperties": false,
+                    "properties": {
+                        "sweepInterval": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Heap allocations between garbage collections. Higher = fewer collections but more memory use. 0 (or omitted) keeps the VM default of 64. Raise it (or set a very large value) to effectively disable collection for a short session."
+                        },
+                        "paranoid": {
+                            "type": "boolean",
+                            "description": "Diagnostic mode: poison freed heap memory with a sentinel and never reuse it, so a use-after-free (a live object the GC wrongly reclaimed) surfaces immediately as a crash/garbage instead of silent corruption. Uses more memory; intended for hunting GC bugs, not shipping."
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -15,6 +15,20 @@ export interface CommandDllEntry {
     class: string;
 }
 
+/** Runtime GC tuning, funneled to the VM (see Game1.SetGcSettings). */
+export interface FadeGcSettings {
+    /** Heap allocations between garbage collections. Higher = fewer
+     *  collections + more memory. 0/omitted keeps the VM default (64). */
+    sweepInterval?: number;
+    /** Diagnostic: poison freed heap memory and never reuse it, so a
+     *  use-after-free surfaces immediately. Costs memory; not for shipping. */
+    paranoid?: boolean;
+}
+
+export interface FadeSettings {
+    gc?: FadeGcSettings;
+}
+
 export interface FadeProject {
     name: string;
     author?: string;
@@ -23,6 +37,8 @@ export interface FadeProject {
     type: FadeProjectType;
     commandDlls?: CommandDllEntry[];
     sources: string[];
+    /** Optional runtime settings (GC tuning, …). */
+    settings?: FadeSettings;
 }
 
 // Validation outcome — either a parsed/typed config or a list of errors
@@ -69,7 +85,7 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
     // Reject unknown keys so typos surface instead of being silently dropped.
     // `$schema` is permitted (and emitted by stringifyFadeProject) so editors
     // can attach the JSON Schema for inline validation.
-    const known = new Set(['$schema', 'name', 'author', 'description', 'type', 'commandDlls', 'sources']);
+    const known = new Set(['$schema', 'name', 'author', 'description', 'type', 'commandDlls', 'sources', 'settings']);
     for (const k of Object.keys(root)) {
         if (!known.has(k)) warn(k, `Unknown property "${k}".`);
     }
@@ -133,6 +149,43 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
         });
     }
 
+    // settings (optional object; currently just settings.gc)
+    let parsedSettings: FadeSettings | undefined;
+    if (root.settings !== undefined) {
+        if (root.settings === null || typeof root.settings !== 'object' || Array.isArray(root.settings)) {
+            err('settings', 'Property "settings" must be an object.');
+        } else {
+            const s = root.settings as Record<string, unknown>;
+            for (const k of Object.keys(s)) {
+                if (k !== 'gc') warn(`settings.${k}`, `Unknown settings property "${k}".`);
+            }
+            if (s.gc !== undefined) {
+                if (s.gc === null || typeof s.gc !== 'object' || Array.isArray(s.gc)) {
+                    err('settings.gc', 'Property "settings.gc" must be an object.');
+                } else {
+                    const gc = s.gc as Record<string, unknown>;
+                    for (const k of Object.keys(gc)) {
+                        if (k !== 'sweepInterval' && k !== 'paranoid')
+                            warn(`settings.gc.${k}`, `Unknown gc setting "${k}".`);
+                    }
+                    if (gc.sweepInterval !== undefined
+                        && (typeof gc.sweepInterval !== 'number' || !Number.isInteger(gc.sweepInterval) || gc.sweepInterval < 0)) {
+                        err('settings.gc.sweepInterval', 'Property "settings.gc.sweepInterval" must be a non-negative integer (0 = VM default).');
+                    }
+                    if (gc.paranoid !== undefined && typeof gc.paranoid !== 'boolean') {
+                        err('settings.gc.paranoid', 'Property "settings.gc.paranoid" must be a boolean.');
+                    }
+                    parsedSettings = {
+                        gc: {
+                            sweepInterval: typeof gc.sweepInterval === 'number' ? gc.sweepInterval : undefined,
+                            paranoid: typeof gc.paranoid === 'boolean' ? gc.paranoid : undefined,
+                        },
+                    };
+                }
+            }
+        }
+    }
+
     const hasErrors = errors.some((e) => e.severity === 'error');
     if (hasErrors) return { ok: false, errors };
     return {
@@ -146,6 +199,7 @@ export function validateFadeProject(raw: unknown): FadeConfigParseResult {
                 ? (root.commandDlls as CommandDllEntry[])
                 : [],
             sources: root.sources as string[],
+            settings: parsedSettings,
         },
         errors, // may still contain warnings
     };
@@ -370,5 +424,13 @@ export function stringifyFadeProject(p: FadeProject): string {
     ordered.type = p.type;
     ordered.commandDlls = p.commandDlls ?? [];
     ordered.sources = p.sources;
+    // Only emit settings when the block carries a value, so untouched projects
+    // don't grow an empty `settings: {}`.
+    if (p.settings?.gc && (p.settings.gc.sweepInterval !== undefined || p.settings.gc.paranoid !== undefined)) {
+        const gc: Record<string, unknown> = {};
+        if (p.settings.gc.sweepInterval !== undefined) gc.sweepInterval = p.settings.gc.sweepInterval;
+        if (p.settings.gc.paranoid !== undefined) gc.paranoid = p.settings.gc.paranoid;
+        ordered.settings = { gc };
+    }
     return JSON.stringify(ordered, null, 2) + '\n';
 }

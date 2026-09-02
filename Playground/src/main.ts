@@ -127,7 +127,6 @@ const EMPTY_CONTENT_PLAN: MonoGameContentPlan = {
 import { mountHelpPanel, extractCommandNameFromHover, findKeywordDocHeading } from './help';
 import { resolveCtrlClickAction } from './ctrl-click';
 import { NavigationHistory, type NavLocation } from './navigation-history';
-import { AssetSyncCache, isAssetNotRegisteredError } from './asset-sync-cache';
 import type { PendingAsset } from './asset-sync-cache';
 import { joinedBreakpointLines } from './breakpoint-sync';
 import type { FileBreakpoints } from './breakpoint-sync';
@@ -294,6 +293,18 @@ class OpfsWorkspace {
     private root!: FileSystemDirectoryHandle;       // workspace/
     private dir!: FileSystemDirectoryHandle;        // workspace/<active-project>/
     private activeProject: string = DEFAULT_PROJECT_NAME;
+
+    // Monotonic counter bumped on every user-file mutation (writes/deletes/
+    // renames outside .fade-cache/). Lets the asset-sync fast-path prove
+    // "nothing changed since last launch" in O(1) — no per-file statting —
+    // for back-to-back launches within one page session. Cache-internal
+    // writes (.fade-cache/) are excluded so a compile pass doesn't spuriously
+    // invalidate it.
+    private mutations = 0;
+    mutationCount(): number { return this.mutations; }
+    private bumpMutation(path: string): void {
+        if (!path.startsWith('.fade-cache/') && path !== '.fade-cache') this.mutations++;
+    }
 
     /** Initialize OPFS + pick an active project if one already exists.
      *
@@ -488,6 +499,7 @@ class OpfsWorkspace {
         const w = await fh.createWritable();
         await w.write(content);
         await w.close();
+        this.bumpMutation(path);
     }
 
     // Binary read/write — used for uploaded assets (.xnb, .png, .wav, …).
@@ -501,6 +513,23 @@ class OpfsWorkspace {
         return new Uint8Array(await f.arrayBuffer());
     }
 
+    /** Cheap file metadata (size + mtime) WITHOUT reading the bytes. Backs the
+     *  asset-manifest memo: fingerprinting assets by (path, size, lastModified)
+     *  lets an unchanged Run/Debug skip the encode + hash of every asset. OPFS
+     *  metadata is a main-thread op that doesn't touch the iframe WASM runtime,
+     *  so it stays fast even while the runtime is busy. Returns null if the
+     *  file is missing. */
+    async statMeta(path: string): Promise<{ size: number; lastModified: number } | null> {
+        try {
+            const { parent, leaf } = await this.walkPath(path, { create: false });
+            const fh = await parent.getFileHandle(leaf);
+            const f = await fh.getFile();
+            return { size: f.size, lastModified: f.lastModified };
+        } catch {
+            return null;
+        }
+    }
+
     async writeBytes(path: string, bytes: Uint8Array): Promise<void> {
         const { parent, leaf } = await this.walkPath(path, { create: true });
         const fh = await parent.getFileHandle(leaf, { create: true });
@@ -510,6 +539,7 @@ class OpfsWorkspace {
         // the lib (web-worker.d.ts pulls it in for our prompt$ plumbing).
         await w.write(new Blob([bytes as BlobPart]));
         await w.close();
+        this.bumpMutation(path);
     }
 
     async delete(path: string): Promise<void> {
@@ -520,6 +550,7 @@ class OpfsWorkspace {
         // recursive: true so deleting a folder cleans children too. For
         // files it has no effect (kept for spec uniformity).
         await parent.removeEntry(leaf, { recursive: true });
+        this.bumpMutation(path);
     }
 
     /** Create an empty directory. No-op if already exists. */
@@ -8404,18 +8435,31 @@ async function bootstrap() {
     }
 
     function applySemanticLayout(id: SemanticLayoutId) {
+        // CRITICAL for monogame: the game runs in an <iframe> hosted inside a
+        // dock panel. dockApi.fromJSON() rebuilds the ENTIRE dock, destroying +
+        // recreating every panel — and recreating an iframe RELOADS it. For the
+        // monogame runtime that means a full ~8MB WASM re-boot, a fresh Game1
+        // with an EMPTY content manager, and a re-registration of every asset,
+        // on EVERY debug launch and EVERY stop (which also fromJSON's back).
+        // That was the real cost behind "why is re-debug so slow" — not the
+        // asset pipeline. So when a monogame game is in play we NEVER rebuild
+        // the grid; we only focus the relevant tabs (focus is a visibility
+        // toggle — it doesn't re-parent the iframe), keeping the game warm.
+        // (Web projects have the same latent issue with the preview iframe, but
+        // its re-boot is cheap; scope the guard to monogame for now.)
+        const preserveIframe = currentProject?.type === 'monogame';
+
         // Debug Mode auto-restore: stash the pre-apply layout so we can
         // snap back when the session ends — unless the user has made
         // structural view changes (opened tabs, redocked, etc) in the
-        // meantime. The post-apply fingerprint below is the comparator;
-        // if it differs at end-of-session, the user has touched things
-        // and we leave their layout alone.
-        if (id === 'debug') {
+        // meantime. Skipped under preserveIframe (we never reshaped the grid,
+        // so there's nothing to snap back — and snapping back would fromJSON).
+        if (id === 'debug' && !preserveIframe) {
             try { preDebugLayoutSnapshot = dockApi.toJSON() as object; }
             catch { preDebugLayoutSnapshot = null; }
         }
         const stored = loadSemanticLayouts();
-        const saved = stored[id];
+        const saved = preserveIframe ? null : stored[id];
         let applied = false;
         if (saved) {
             try {
@@ -8428,11 +8472,11 @@ async function bootstrap() {
             }
         }
         if (!applied) {
-            // No saved override → don't reshape the grid, just activate
-            // the relevant tabs in their groups.
+            // No saved override (or monogame) → don't reshape the grid, just
+            // activate the relevant tabs in their groups.
             focusSemanticPanels(id);
         }
-        if (id === 'debug') {
+        if (id === 'debug' && !preserveIframe) {
             try { postDebugLayoutFingerprint = JSON.stringify(dockApi.toJSON()); }
             catch { postDebugLayoutFingerprint = null; }
         }
@@ -9631,17 +9675,97 @@ async function bootstrap() {
     // any asset bytes touches nothing on the iframe side — no decode,
     // no postMessage, no GPU upload. Wiped if the user calls
     // forceAssetCacheClear() or switches projects (page reload).
-    // Diff-based sync state lives in AssetSyncCache (see asset-sync-cache.ts).
-    // invalidate() is called whenever the runtime's content manager is torn
-    // down (fatal tick error / watchdog rebuild / observed "not registered"),
-    // so the next Run re-registers everything instead of skipping against a
-    // stale belief — the fix for the intermittent "Registered: []" failure.
-    const assetSyncCache = new AssetSyncCache();
+    // "What's registered in the runtime" is NO LONGER tracked on the page — the
+    // runtime answers that itself via manifest-reconcile (see the reconcile in
+    // syncAssetsToRuntime + the 'reconcile-assets' handler in the iframe), so
+    // there's no page-side belief to keep in sync or invalidate.
 
+    // ─── Asset-launch timing diagnostics ─────────────────────────────────
+    // Off by default. Enable from the devtools console with
+    //   fadeAssetTiming(true)     ← persists across reloads (localStorage)
+    // then Run/Debug; each sync prints a `[fade-timing] sync` line breaking the
+    // asset phase into list / manifest / reconcile / register / gc, and the
+    // debug adapter prints `sync` vs `debugStart`. `fadeAssetTiming(false)` off.
+    const assetTimingOn = (): boolean => {
+        try { return localStorage.getItem('fade.assetTiming') === '1'; } catch { return false; }
+    };
+    (window as any).fadeAssetTiming = (on: boolean = true): void => {
+        try { localStorage.setItem('fade.assetTiming', on ? '1' : '0'); } catch { /* ignore */ }
+        console.log(`[fade-timing] asset timing ${on ? 'ON' : 'OFF'}`);
+    };
+
+    // ─── Persistent asset manifest ───────────────────────────────────────
+    // The manifest broadcast to the runtime (name → xnbHash → kind) is
+    // expensive to rebuild: even on a full .fade-cache hit we re-read every
+    // source + every compiled XNB off OPFS and re-hash the XNB (its content
+    // hash IS the manifest hash). Persist the built manifest next to the cache
+    // so a cold page load (the "refresh, then debug" case) can reuse it instead
+    // of recomputing — the byte caches (.fade-cache blobs, the runtime's
+    // IndexedDB) already survive reload; only this derived manifest didn't.
+    //
+    // Validity is a fingerprint of (size + mtime) over the project's SOURCE
+    // files AND asset files. Source is included so a macro edit that changes an
+    // asset's compression still invalidates WITHOUT having to run the plan to
+    // notice — which is what lets the launch flow skip the macro pass entirely
+    // on a clean hit. Metadata-only (no byte reads), so the check stays cheap
+    // and never touches the busy WASM runtime. Lives under .fade-cache/ so
+    // forceAssetCacheClear() (and ENCODER_VERSION, folded into the fingerprint)
+    // invalidate it for free.
+    const PERSIST_MANIFEST_PATH = `.fade-cache/manifest.json`;
+    type ManifestEntry = { name: string; hash: string; kind: PendingAsset['kind'] };
+    type PersistedManifest = { fingerprint: string; parts: string[]; manifest: ManifestEntry[] };
+    // L1 (in-memory) memo in front of the persisted L2. Gated by the workspace
+    // mutation counter: if nothing was written since the last launch this
+    // session, we skip even the fingerprint stat (statting ~80 files is itself
+    // seconds on a heavy project when the runtime is busy). A page reload wipes
+    // this and falls back to the persisted manifest (one stat pass).
+    let inMemoryLaunchMemo: { mutation: number; manifest: ManifestEntry[] } | null = null;
+    const readPersistedManifest = async (): Promise<PersistedManifest | null> => {
+        try {
+            const parsed = JSON.parse(await workspace.read(PERSIST_MANIFEST_PATH));
+            if (typeof parsed?.fingerprint === 'string' && Array.isArray(parsed.manifest)) {
+                return parsed as PersistedManifest;
+            }
+        } catch { /* missing or malformed → treat as no cache */ }
+        return null;
+    };
+    const writePersistedManifest = async (m: PersistedManifest): Promise<void> => {
+        try { await workspace.write(PERSIST_MANIFEST_PATH, JSON.stringify(m)); }
+        catch (e) { console.warn('[fade] failed to persist asset manifest', e); }
+    };
+
+    // `plan` may be a value or a thunk. The thunk is invoked ONLY when we have
+    // to (re)build — a fresh manifest hit never runs it, which is how Debug
+    // skips the macro pass (compileForRun) on an unchanged relaunch. `persist`
+    // gates the persistent-manifest read/write to the real launch flow
+    // (Run/Debug); ad-hoc syncs (catalog import, shader reload) always rebuild
+    // so they can't leave behind a manifest built with a non-launch plan.
     async function syncAssetsToRuntime(
-        plan: MonoGameContentPlan = EMPTY_CONTENT_PLAN,
+        plan: MonoGameContentPlan | (() => Promise<MonoGameContentPlan>) = EMPTY_CONTENT_PLAN,
+        opts: { persist?: boolean } = {},
     ): Promise<void> {
+        const { persist = false } = opts;
+        // Raise the canvas loading overlay up front — BEFORE the (possibly
+        // multi-second, post-refresh) fingerprint stat + reconcile — so the
+        // game view reads "Preparing assets…" immediately instead of looking
+        // frozen until the last few assets stream in. On a warm launch the
+        // whole sync is ~20ms, so this shows for a sub-frame and the launch's
+        // debug-start/begin-program hides it. Only on the real launch flow.
+        if (persist) { try { monoGameHost.setSplash('Preparing assets…'); } catch { /* best-effort */ } }
+        const resolvePlan = (): Promise<MonoGameContentPlan> =>
+            typeof plan === 'function' ? plan() : Promise.resolve(plan);
+        const _tSync0 = performance.now();
+        // Phase timer (gated by fadeAssetTiming). Each mark records ms since the
+        // previous mark so we can see exactly which sub-phase is slow.
+        const _phase: Record<string, number> = {};
+        let _tp = _tSync0;
+        const mark = (name: string): void => {
+            const now = performance.now();
+            _phase[name] = Math.round(now - _tp);
+            _tp = now;
+        };
         const allNames = await workspace.list();
+        mark('list');
         // Exclude the asset cache from registration — its blobs are XNB
         // files keyed by hash, not user-addressable assets. The cache is
         // managed by the compile passes + the shared GC below.
@@ -9682,141 +9806,241 @@ async function bootstrap() {
             (n) => /\.xnb$/i.test(n) && !n.startsWith('.fade-cache/'),
         );
 
-        // Build the target asset set first — collect bytes + a content
-        // hash for every asset that should be loaded after this sync.
-        // Then diff against assetSyncCache and only push the changes.
-        // This makes repeat Runs essentially free for unchanged audio
-        // (no `decodeAudioData`) and textures (no GPU re-upload).
-        const target = new Map<string, PendingAsset>();
+        // Build the target asset set — bytes + a content hash for every asset
+        // that should be loaded after this sync. Extracted into a function so
+        // the manifest memo below can SKIP it wholesale on an unchanged
+        // re-launch: the compile passes drive the single-threaded iframe WASM
+        // runtime, so re-running them while it's busy (booting, ticking a
+        // previous session) costs SECONDS even when every asset is a pure
+        // cache-hit. Cache hits already avoid the decode+encode; the hash gate
+        // then skips re-sending identical bytes to the iframe.
+        const buildAssetTargets = async (plan: MonoGameContentPlan): Promise<Map<string, PendingAsset>> => {
+            const target = new Map<string, PendingAsset>();
 
-        // Phase 1a: images — compile via the OPFS-backed cache then
-        // hash the resulting XNB bytes. Cache hits avoid the
-        // decode+encode entirely; the hash gate then skips re-sending
-        // bytes to the iframe when the XNB is identical to last Run.
-        if (imageSources.length > 0) {
-            try {
-                const { assets, diagnostics } =
-                    await compileImageAssetsWithPlan(workspace, imageSources, plan);
-                for (const d of diagnostics) reportDiagnostic(d);
-                for (const a of assets) {
-                    const hash = await sha256Hex(a.bytes);
-                    target.set(a.assetName, {
-                        name: a.assetName, kind: 'image', hash, bytes: a.bytes,
-                    });
-                }
-            } catch (e) {
-                assetLog.error(`image-asset compile pass failed: ${(e as any)?.message ?? e}`);
-            }
-        }
-
-        // Phase 1b: audio — the iframe's Web Audio host decodes raw
-        // source bytes (MP3/OGG/WAV/FLAC/AAC). Hash is computed over
-        // the raw source bytes: if they're unchanged from last Run, the
-        // diff below skips the `register-audio` postMessage and the
-        // previously-decoded AudioBuffer stays cached in JS memory.
-        if (audioSources.length > 0) {
-            for (const path of audioSources) {
-                const assetName = assetNameForSourcePath(path);
+            // Phase 1a: images — compile via the OPFS-backed cache then hash
+            // the resulting XNB bytes.
+            if (imageSources.length > 0) {
                 try {
-                    const bytes = await workspace.readBytes(path);
+                    const { assets, diagnostics } =
+                        await compileImageAssetsWithPlan(workspace, imageSources, plan);
+                    for (const d of diagnostics) reportDiagnostic(d);
+                    for (const a of assets) {
+                        const hash = await sha256Hex(a.bytes);
+                        target.set(a.assetName, {
+                            name: a.assetName, kind: 'image', hash, bytes: a.bytes,
+                        });
+                    }
+                } catch (e) {
+                    assetLog.error(`image-asset compile pass failed: ${(e as any)?.message ?? e}`);
+                }
+            }
+
+            // Phase 1b: audio — the iframe's Web Audio host decodes raw
+            // source bytes (MP3/OGG/WAV/FLAC/AAC). Hash is computed over
+            // the raw source bytes: if they're unchanged from last Run, the
+            // reconcile below skips the `register-audio` postMessage and the
+            // previously-decoded AudioBuffer stays cached in JS memory.
+            if (audioSources.length > 0) {
+                for (const path of audioSources) {
+                    const assetName = assetNameForSourcePath(path);
+                    try {
+                        const bytes = await workspace.readBytes(path);
+                        const hash = await sha256Hex(bytes);
+                        target.set(assetName, {
+                            name: assetName, kind: 'audio', hash, bytes,
+                        });
+                    } catch (e: any) {
+                        assetLog.error(`${assetName}: read failed: ${e?.message ?? e}`);
+                    }
+                }
+            }
+
+            // Phase 1c: fonts — TTF/OTF compiled to SpriteFont XNBs via
+            // the same OPFS cache as images. Hash is the XNB output.
+            if (fontSources.length > 0) {
+                try {
+                    const { assets, diagnostics } =
+                        await compileFontAssetsWithPlan(workspace, fontSources, plan);
+                    for (const d of diagnostics) reportDiagnostic(d);
+                    for (const a of assets) {
+                        const hash = await sha256Hex(a.bytes);
+                        target.set(a.assetName, {
+                            name: a.assetName, kind: 'font', hash, bytes: a.bytes,
+                        });
+                    }
+                } catch (e) {
+                    assetLog.error(`font compile pass failed: ${(e as any)?.message ?? e}`);
+                }
+            }
+
+            // Phase 1d: shaders — `.fx` source files compiled to MGFX v10
+            // effect XNBs via the FX framing parser + WASM shader compiler.
+            // Hash is computed over the XNB output so changing the source
+            // (or the compiler version) re-syncs; unchanged shaders skip
+            // re-registration entirely.
+            //
+            // Clear any KNI compile-error markers on .fx files before starting
+            // the new sync. If the new compile fails again, the stderr
+            // capture below will set fresh markers; if it succeeds we leave
+            // the editor clean.
+            if (shaderSources.length > 0) clearShaderMarkers();
+            if (shaderSources.length > 0) {
+                try {
+                    const { assets, diagnostics } =
+                        await compileShaderAssetsWithPlan(workspace, shaderSources, plan);
+                    for (const d of diagnostics) reportDiagnostic(d);
+                    for (const a of assets) {
+                        const hash = await sha256Hex(a.bytes);
+                        // Audit trail in the Logs panel ('asset' channel) —
+                        // shader staleness was a real bug we had to chase, so
+                        // keep the hash visible. Comparing the xnbHash across
+                        // two Runs tells you whether the source edit actually
+                        // produced different compiled bytes.
+                        assetLog.info(
+                            `shader ${a.assetName}: ${a.cached ? 'cache-hit' : 'compiled'} ` +
+                            `(${a.bytes.length} B, xnbHash=${hash.slice(0, 8)})`,
+                        );
+                        target.set(a.assetName, {
+                            name: a.assetName, kind: 'shader', hash, bytes: a.bytes,
+                        });
+                    }
+                } catch (e) {
+                    assetLog.error(`shader compile pass failed: ${(e as any)?.message ?? e}`);
+                }
+            }
+
+            // Phase 1e: pre-built `.xnb` uploads (legacy assets the user
+            // brought in directly). Run through the KNI patcher then hash.
+            for (const name of xnbSources) {
+                try {
+                    const raw = await workspace.readBytes(name);
+                    const bytes = patchXnbForKni(raw);
+                    const assetName = name.replace(/\.xnb$/i, '');
                     const hash = await sha256Hex(bytes);
                     target.set(assetName, {
-                        name: assetName, kind: 'audio', hash, bytes,
+                        name: assetName, kind: 'xnb', hash, bytes,
                     });
-                } catch (e: any) {
-                    assetLog.error(`${assetName}: read failed: ${e?.message ?? e}`);
+                } catch (e) {
+                    console.error('[fade] asset push failed for', name, e);
                 }
             }
-        }
 
-        // Phase 1c: fonts — TTF/OTF compiled to SpriteFont XNBs via
-        // the same OPFS cache as images. Hash is the XNB output.
-        if (fontSources.length > 0) {
-            try {
-                const { assets, diagnostics } =
-                    await compileFontAssetsWithPlan(workspace, fontSources, plan);
-                for (const d of diagnostics) reportDiagnostic(d);
-                for (const a of assets) {
-                    const hash = await sha256Hex(a.bytes);
-                    target.set(a.assetName, {
-                        name: a.assetName, kind: 'font', hash, bytes: a.bytes,
+            return target;
+        };
+
+        // ─── Manifest: reuse persisted, or (re)build ─────────────────────
+        // If L1 will hit (nothing written since last launch this session), we
+        // won't use the fingerprint at all — so skip the per-file stat that
+        // builds it. That's the pass that was costing seconds on a big project.
+        const _l1Hit = persist && inMemoryLaunchMemo !== null
+            && inMemoryLaunchMemo.mutation === workspace.mutationCount();
+        const assetSourcePaths = [
+            ...imageSources, ...audioSources, ...fontSources, ...shaderSources, ...xnbSources,
+        ].sort();
+        const sourceFiles = names.filter((n) => /\.(fbasic|fb)$/i.test(n)).sort();
+        const _fpParts: string[] = [`enc:${ENCODER_VERSION}`];
+        for (const p of [...sourceFiles, ...assetSourcePaths]) {
+            const meta = _l1Hit ? null : await workspace.statMeta(p);
+            _fpParts.push(`${p} ${meta ? `${meta.size}@${meta.lastModified}` : 'x'}`);
+        }
+        const assetFingerprint = _fpParts.join('');
+
+        let target: Map<string, PendingAsset> | null = null;
+        let manifest: ManifestEntry[] = [];
+        let memoHit = false;
+        const curMutation = workspace.mutationCount();
+        // L1 (in-memory) fast path: if nothing was written since our last launch
+        // this session, skip the fingerprint stat + persisted read entirely.
+        if (persist && inMemoryLaunchMemo && inMemoryLaunchMemo.mutation === curMutation) {
+            manifest = inMemoryLaunchMemo.manifest;
+            memoHit = true;
+            console.log('[fade-manifest] HIT (L1, in-memory): nothing changed since last launch');
+        } else {
+        // Clean hit → reuse the persisted manifest and never build: no plan
+        // (the thunk stays uncalled), no encode, no hash. Miss → resolve the
+        // plan, rebuild, re-persist. On a hit we hold no bytes; if reconcile
+        // reports the runtime still needs some (rare — it evicted one since we
+        // built), we materialize them with a full build below.
+        const cachedManifest = persist ? await readPersistedManifest() : null;
+        if (cachedManifest && cachedManifest.fingerprint === assetFingerprint) {
+            manifest = cachedManifest.manifest;
+            memoHit = true;
+        } else {
+            // TEMP diagnostic: say exactly why the persisted manifest didn't hit.
+            if (persist) {
+                if (!cachedManifest) {
+                    console.log('[fade-manifest] MISS: no persisted manifest on disk (first launch, or write failed)');
+                } else {
+                    const now = new Set(_fpParts);
+                    const old = new Set(cachedManifest.parts ?? []);
+                    const changedNow = _fpParts.filter((p) => !old.has(p));
+                    const changedOld = (cachedManifest.parts ?? []).filter((p) => !now.has(p));
+                    console.log('[fade-manifest] MISS: fingerprint changed', {
+                        nowCount: _fpParts.length, oldCount: (cachedManifest.parts ?? []).length,
+                        newOrChanged: changedNow.slice(0, 8), goneOrChanged: changedOld.slice(0, 8),
                     });
                 }
-            } catch (e) {
-                assetLog.error(`font compile pass failed: ${(e as any)?.message ?? e}`);
             }
+            target = await buildAssetTargets(await resolvePlan());
+            manifest = Array.from(target.values()).map((a) => ({ name: a.name, hash: a.hash, kind: a.kind }));
+            if (persist) await writePersistedManifest({ fingerprint: assetFingerprint, parts: _fpParts, manifest });
         }
-
-        // Phase 1d: shaders — `.fx` source files compiled to MGFX v10
-        // effect XNBs via the FX framing parser + WASM shader compiler.
-        // Hash is computed over the XNB output so changing the source
-        // (or the compiler version) re-syncs; unchanged shaders skip
-        // re-registration entirely.
-        //
-        // Clear any KNI compile-error markers on .fx files before starting
-        // the new sync. If the new compile fails again, the stderr
-        // capture below will set fresh markers; if it succeeds we leave
-        // the editor clean.
-        if (shaderSources.length > 0) clearShaderMarkers();
-        if (shaderSources.length > 0) {
-            try {
-                const { assets, diagnostics } =
-                    await compileShaderAssetsWithPlan(workspace, shaderSources, plan);
-                for (const d of diagnostics) reportDiagnostic(d);
-                for (const a of assets) {
-                    const hash = await sha256Hex(a.bytes);
-                    // Audit trail in the Logs panel ('asset' channel) —
-                    // shader staleness was a real bug we had to chase, so
-                    // keep the hash visible. Comparing the xnbHash across
-                    // two Runs tells you whether the source edit actually
-                    // produced different compiled bytes.
-                    assetLog.info(
-                        `shader ${a.assetName}: ${a.cached ? 'cache-hit' : 'compiled'} ` +
-                        `(${a.bytes.length} B, xnbHash=${hash.slice(0, 8)})`,
-                    );
-                    target.set(a.assetName, {
-                        name: a.assetName, kind: 'shader', hash, bytes: a.bytes,
-                    });
-                }
-            } catch (e) {
-                assetLog.error(`shader compile pass failed: ${(e as any)?.message ?? e}`);
-            }
+        // Prime L1 so the next launch this session (nothing changed) skips the
+        // stat pass above.
+        if (persist) inMemoryLaunchMemo = { mutation: curMutation, manifest };
         }
-
-        // Phase 1e: pre-built `.xnb` uploads (legacy assets the user
-        // brought in directly). Run through the KNI patcher then hash.
-        for (const name of xnbSources) {
-            try {
-                const raw = await workspace.readBytes(name);
-                const bytes = patchXnbForKni(raw);
-                const assetName = name.replace(/\.xnb$/i, '');
-                const hash = await sha256Hex(bytes);
-                target.set(assetName, {
-                    name: assetName, kind: 'xnb', hash, bytes,
-                });
-            } catch (e) {
-                console.error('[fade] asset push failed for', name, e);
-            }
+        mark('manifest');
+        const _manifestMs = performance.now() - _tSync0;
+        // Namespace the runtime's persistent asset cache per project so pruning
+        // one project's stale assets never evicts another's.
+        const projectId = currentProject?.name ?? 'default';
+        const _tRecon = performance.now();
+        let need: string[];
+        try {
+            need = await monoGameHost.reconcileAssets(projectId, manifest);
+        } catch (e) {
+            // Reconcile failed — fall back to registering everything (correct,
+            // just not fast). Never leaves the runtime under-provisioned.
+            console.error('[fade] asset reconcile failed; registering all', e);
+            need = manifest.map((m) => m.name);
         }
-
-        // ─── Diff vs last Run ────────────────────────────────────────
-        // For each tracked asset, decide one of: skip (hash match),
-        // re-register (hash changed), unregister (no longer present).
-        // Audio routes through unregisterAudio + registerAudio; the
-        // other kinds share the unregisterAsset / registerAsset path.
-        // assetSyncCache.invalidate() (see onGameError / onStderr) resets
-        // the baseline when the runtime rebuilt its content manager, so a
-        // fresh runtime re-registers everything instead of skipping.
-        const { toUnregister, toRegister, skipped } = assetSyncCache.diff(target);
-
-        for (const old of toUnregister) {
-            if (old.kind === 'audio') await monoGameHost.unregisterAudio(old.name);
-            else await monoGameHost.unregisterAsset(old.name);
+        // Memo HIT means we never built the byte-bearing target map. If the
+        // runtime still needs some assets' bytes, materialize them now with a
+        // full build (rare: the runtime evicted an asset since our last sync).
+        if (need.length > 0 && !target) {
+            target = await buildAssetTargets(await resolvePlan());
         }
+        const toRegister = target
+            ? need.map((n) => target!.get(n)).filter((a): a is PendingAsset => !!a)
+            : [];
+        const skipped = manifest.length - toRegister.length;
+        // Visibility into the reconcile: how much the manifest carried, how much
+        // the runtime already held, and whether the memo let us skip rebuilding.
+        const _reconMs = performance.now() - _tRecon;
+        mark('reconcile');
+        console.log(`[fade-reconcile] manifest=${manifest.length} holds ${skipped} sending ${toRegister.length}${memoHit ? ' (memo)' : ''} · build ${(_manifestMs / 1000).toFixed(2)}s reconcile ${(_reconMs / 1000).toFixed(2)}s`);
+
+        // Register only what the runtime asked for — a per-asset round-trip that
+        // decodes + registers each one. Surface a running count so an asset-heavy
+        // cold start isn't dead air (per-asset detail still goes to Logs).
+        if (toRegister.length > 8) {
+            appendOutputLine(`Registering ${toRegister.length} assets to the runtime…`, 'dim');
+        }
+        // Loading overlay on the game canvas while we push assets (first load /
+        // after a project change). Only for a substantial batch so a warm launch
+        // with nothing to send doesn't flash it. The launch's debug-start /
+        // begin-program hides it once the program runs.
+        // Only on the launch flow (persist) — it always ends with a
+        // debug-start / begin-program that hides the splash. Ad-hoc syncs
+        // (catalog import, shader reload) have no such handoff, so they must not
+        // raise an overlay they can't take down.
+        const _splashOnPush = persist && toRegister.length >= 4;
+        if (_splashOnPush) monoGameHost.setSplash(`Loading assets… 0/${toRegister.length}`);
+        let _registered = 0;
         for (const a of toRegister) {
             try {
                 if (a.kind === 'audio') {
-                    const ok = await monoGameHost.registerAudio(a.name, a.bytes);
+                    const ok = await monoGameHost.registerAudio(a.name, a.bytes, a.hash, projectId);
                     if (!ok) {
                         appendOutputLine(
                             `[asset ${a.name}] audio decode failed — browser couldn't decode ` +
@@ -9829,7 +10053,7 @@ async function bootstrap() {
                         );
                     }
                 } else {
-                    await monoGameHost.registerAsset(a.name, a.bytes);
+                    await monoGameHost.registerAsset(a.name, a.bytes, a.hash, projectId);
                     assetLog.info(
                         `${a.name}: registered ${a.kind} (${(a.bytes.length / 1024).toFixed(1)} KB) enc=${ENCODER_VERSION}`,
                     );
@@ -9837,21 +10061,35 @@ async function bootstrap() {
             } catch (e) {
                 assetLog.error(`${a.name}: register failed: ${(e as any)?.message ?? e}`);
             }
+            _registered++;
+            // Canvas loading overlay tracks every asset; the Output panel gets a
+            // lighter heartbeat every 25 so it isn't spammed.
+            if (_splashOnPush) monoGameHost.setSplash(`Loading assets… ${_registered}/${toRegister.length}`);
+            if (toRegister.length > 8 && (_registered % 25 === 0 || _registered === toRegister.length)) {
+                appendOutputLine(`  …${_registered}/${toRegister.length} assets`, 'dim');
+            }
         }
         if (skipped > 0) {
-            assetLog.info(`${skipped} asset${skipped === 1 ? '' : 's'} unchanged — kept from previous Run`);
+            assetLog.info(`${skipped} asset${skipped === 1 ? '' : 's'} already held by the runtime (in-memory or its cache) — not re-sent`);
         }
 
-        // Commit the new state as the baseline for the next diff.
-        assetSyncCache.commit(target);
-
+        mark('register');
         // Shared cache GC — runs once all compile passes have populated
-        // liveSourcePaths so neither kind's entries get wrongly evicted.
-        const liveSources = new Set<string>([
-            ...imageSources, ...audioSources, ...fontSources, ...shaderSources,
-        ]);
-        try { await garbageCollectAssetCache(workspace, liveSources); }
-        catch (e) { console.warn('[fade] asset cache GC failed', e); }
+        // liveSourcePaths so neither kind's entries get wrongly evicted. Skip
+        // it on a memo hit: nothing was (re)compiled, so there are no new stale
+        // blobs to sweep, and the GC's own tree walk isn't free.
+        if (!memoHit) {
+            const liveSources = new Set<string>([
+                ...imageSources, ...audioSources, ...fontSources, ...shaderSources,
+            ]);
+            try { await garbageCollectAssetCache(workspace, liveSources); }
+            catch (e) { console.warn('[fade] asset cache GC failed', e); }
+        }
+        mark('gc');
+        if (assetTimingOn()) {
+            const total = Math.round(performance.now() - _tSync0);
+            console.log(`[fade-timing] sync ${total}ms`, _phase, memoHit ? `(memo, sending ${toRegister.length})` : `(built, sending ${toRegister.length})`);
+        }
     }
 
     // Build the list of command-DLL entries for the active project.
@@ -10031,7 +10269,7 @@ async function bootstrap() {
                     refreshStopButton();
                     return;
                 }
-                await syncAssetsToRuntime(compile.plan);
+                await syncAssetsToRuntime(compile.plan, { persist: true });
                 const started = await monoGameHost.beginPendingProgram();
                 if (started) {
                     // No "Running…" message — user `print` output now
@@ -12357,11 +12595,9 @@ async function bootstrap() {
         // Iframe rAF is already dead (tickHalted); clear our pause state too.
         mgTickPaused = false;
         updateGameStatus('stopped');
-        // A fatal tick error nulls the runtime's Game1; the next Run
-        // rebuilds it with an EMPTY BrowserContentManager. Drop the sync
-        // baseline so that Run re-registers every asset instead of skipping
-        // against a stale belief (the "Registered: []" bug).
-        assetSyncCache.invalidate();
+        // (No asset-cache bookkeeping needed anymore — even after a Game1
+        // rebuild the next Run's manifest-reconcile asks the runtime what it
+        // actually holds and re-registers only the gaps.)
     };
 
     // Pipe iframe-side Console.WriteLine output into the Logs panel.
@@ -12373,12 +12609,6 @@ async function bootstrap() {
     monoGameHost.onStdout = handleProgramPrint;
     monoGameHost.onStderr = (line) => {
         handleProgramStderr(line);
-        // Self-heal: if the runtime reports its asset registry came up
-        // empty (a Game1 rebuilt out from under us — e.g. after the frame
-        // watchdog nulled it, which the page otherwise never learns about),
-        // drop the sync baseline so the next Run re-registers everything.
-        // Without this the failure sticks until a full page reload.
-        if (isAssetNotRegisteredError(line)) assetSyncCache.invalidate();
         // KNI's `Console.Error.WriteLine` of a multi-line error message
         // arrives here as ONE stderr event with embedded newlines (the
         // iframe's console-forwarding bridge does join+post per call,
@@ -12704,12 +12934,31 @@ async function bootstrap() {
     // throughout the bootstrap) don't churn. `localDebugAdapter` is
     // exposed alongside so the future adapter swap can fall back to
     // it for host-side RPC handlers that always execute locally.
+    // The content plan for a launch, as a THUNK: computed only when the asset
+    // build actually runs. A fresh persisted-manifest hit skips it entirely, so
+    // an unchanged relaunch never re-runs the macro pass.
+    const launchContentPlanThunk = async (): Promise<MonoGameContentPlan> => {
+        try {
+            const planSource = await getProjectSource();
+            if (planSource) {
+                const compiled = await monoGameHost.compileForRun(planSource);
+                if (compiled.ok && compiled.plan) return compiled.plan;
+            }
+        } catch (e) { console.warn('[fade] launch content-plan compile failed, using default', e); }
+        return EMPTY_CONTENT_PLAN;
+    };
+
     const localDebugAdapter: DebugAdapter = createLocalDebugAdapter({
         runner,
         monoGameHost,
         getProjectType: () => (currentProject?.type as 'web' | 'monogame' | null) ?? null,
         ensureWebVmReady: ensureWebVmReadyForDebug,
-        syncMonoGameAssets: syncAssetsToRuntime,
+        // The adapter syncs assets right before debugStart so the runtime's
+        // dict is populated before LoadProgram. Route it through the SAME
+        // plan-aware, persisted-manifest path the launch flow uses so an
+        // unchanged relaunch hits the manifest and skips the rebuild (this was
+        // the second, non-memoized sync that kept debug slow).
+        syncMonoGameAssets: () => syncAssetsToRuntime(launchContentPlanThunk, { persist: true }),
     });
 
     // ── Shader hot-reload ─────────────────────────────────────────────────
@@ -12830,6 +13079,14 @@ async function bootstrap() {
         // debugSessionActive flag below takes over.
         runActive = true;
         refreshRunButtons();
+        // Also enable Stop and show a "starting" game status DURING the
+        // (potentially slow, or — if the runtime wedged — hung) starter()
+        // await below. Without this the UI sits at "Reset" / disabled-Stop /
+        // "Stopped" with no way to abort a stuck start. refreshStopButton reads
+        // runActive (now true), so Stop becomes clickable → the user can bail
+        // out via stopAll.
+        refreshStopButton();
+        if (currentProject?.type === 'monogame') updateGameStatus('booting');
         // Register assets before starting the debug session. Unlike the Run
         // path (runOnce → compileForRun → syncAssetsToRuntime → begin), the
         // debug-start path (dbg.start → monoGameHost.debugStart → LoadProgram)
@@ -12841,17 +13098,53 @@ async function bootstrap() {
         // stale) and push assets first. postMessage FIFO in the iframe
         // guarantees these register-asset messages are processed before
         // debug-start's LoadProgram runs the program.
+        // Progress logging: debug start is otherwise a silent ~pause while the
+        // runtime boots, assets encode, and a (possibly large) program compiles.
+        // On a big project (e.g. killcode, 3k+ lines) that's 10-20s of dead air
+        // with no indication of what's happening — surface each phase + timing.
+        const tDebugStart = performance.now();
+        // Per-phase timing so a slow Debug start isn't a black box. First-time
+        // Run is near-instant, so any slowness below is Debug-specific.
+        let bootMs = 0;
         if (currentProject?.type === 'monogame') {
-            assetSyncCache.invalidate();
-            try { await syncAssetsToRuntime(); }
-            catch (e) { console.error('[fade] debug: syncAssetsToRuntime failed', e); }
+            // Phase A — boot the runtime, timed on its own.
+            appendOutputLine('Debug: booting runtime…', 'dim');
+            const tBoot = performance.now();
+            try { await monoGameHost.ensureBooted(); }
+            catch (e) { console.warn('[fade] debug: ensureBooted failed', e); }
+            bootMs = performance.now() - tBoot;
+            appendOutputLine(`Debug: runtime booted (${(bootMs / 1000).toFixed(1)}s)`, 'dim');
+
+            // NOTE: assets are NOT synced here. The debug adapter's start()
+            // (dbg.start → local-adapter.start → syncMonoGameAssets) syncs them
+            // right before debugStart, via the SAME plan-aware, persisted-
+            // manifest path — see `syncMonoGameAssets` in the adapter wiring.
+            // A separate sync here just doubled the (now non-trivial) validate +
+            // reconcile round-trip on every launch.
         }
-        const result = await starter();
+        // Phase C — the debug compile (compile WITH debug data) + DebugStart.
+        appendOutputLine('Debug: compiling (with debug data) + starting session…', 'dim');
+        // starter() can REJECT (not just return {ok:false}) — e.g. the
+        // monogame debug-start timeout when the iframe is wedged. Treat a
+        // throw as a failed start so the UI still tears down cleanly instead
+        // of leaving runActive stuck true (frozen "Reset" + disabled Stop).
+        const tStarter = performance.now();
+        let result: DebugStartResult;
+        try {
+            result = await starter();
+        } catch (e: any) {
+            result = { ok: false, error: e?.message ?? String(e) } as DebugStartResult;
+        }
         if (!result.ok) {
             setDebugStatus('failed to start', 'error');
             appendReplLine(result.error ?? 'Failed to start', 'err');
+            // Take down the loading overlay — on success debug-start hides it,
+            // but a failed start never reaches that, so hide it here.
+            try { monoGameHost.setSplash('', { hide: true }); } catch { /* best-effort */ }
             runActive = false;
             refreshRunButtons();
+            refreshStopButton();               // re-disable Stop (all flags now false)
+            updateGameStatus('stopped');       // clear the "booting" status we set above
             // Roll back the Debug Mode layout we applied above — there's
             // no session to keep, and the user shouldn't be stuck looking
             // at Debug Mode after a failed start.
@@ -12864,6 +13157,17 @@ async function bootstrap() {
         // New session — clear any sticky fatal-exception state left over
         // from a previous session whose crash overlay was dismissed.
         debugFatalException = false;
+        // Clear the 'booting' game status we set at the top of the start: the
+        // session is now up (paused at entry). Without this the game panel is
+        // stuck reading "Booting…" for the whole session, since the only other
+        // thing that updates it is the editor focus/blur pause handlers.
+        updateGameStatus(mgTickPaused ? 'paused' : 'running');
+        appendOutputLine(
+            // The asset sync now happens inside the starter (adapter.start),
+            // so it's folded into this "assets+start" number.
+            `Debug ready — boot ${(bootMs / 1000).toFixed(1)}s · assets+start ${((performance.now() - tStarter) / 1000).toFixed(1)}s`
+            + ` · total ${((performance.now() - tDebugStart) / 1000).toFixed(1)}s. Running to first breakpoint…`,
+            'dim');
         setDebugStatus('starting', 'paused');
         setDebugButtons();
         // Live-session: mark this peer as the debug initiator. Both the

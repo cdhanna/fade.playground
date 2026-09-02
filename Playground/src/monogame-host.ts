@@ -522,11 +522,25 @@ class MonoGameHost {
     }
 
     // id-correlated round-trip. Use for messages where the iframe sends
-    // back an <op>-result envelope.
-    private call<T = any>(payload: { type: string; [k: string]: any }, transfer?: Transferable[]): Promise<T> {
+    // back an <op>-result envelope. Pass `timeoutMs` for ops that can wedge
+    // the iframe (e.g. debug-start after a messy prior session) — without it a
+    // lost reply hangs the awaiter forever, freezing the Debug UI with no
+    // recovery. On timeout we drop the pending entry and reject; a late reply
+    // then finds no pending entry (see the reply handler) and is ignored.
+    private call<T = any>(payload: { type: string; [k: string]: any }, transfer?: Transferable[], timeoutMs?: number): Promise<T> {
         const id = ++this.nextCallId;
         return new Promise<T>((resolve, reject) => {
             this.pending.set(id, { resolve, reject });
+            if (timeoutMs && timeoutMs > 0) {
+                setTimeout(() => {
+                    // delete() returns true only if the reply hadn't already
+                    // arrived and cleared the entry — so this rejects exactly
+                    // once, and never races a real reply.
+                    if (this.pending.delete(id)) {
+                        reject(new Error(`[monogame-host] '${payload.type}' timed out after ${timeoutMs}ms — the runtime may be wedged. Try Stop, then reload the page.`));
+                    }
+                }, timeoutMs);
+            }
             try {
                 this.postToIframe({ ...payload, id }, transfer);
             } catch (e: any) {
@@ -544,6 +558,17 @@ class MonoGameHost {
     }
 
     // ─── JSInvokable bridges (now postMessage round-trips) ─────────────
+
+    // Push fade.json's `settings.gc` to the runtime (Game1.SetGcSettings).
+    // Fire-and-forget; the runtime applies it to the live VM immediately and to
+    // every VM it builds thereafter. Sent before loadProgram so the very first
+    // VM already has the settings. sweepInterval 0 → keep the VM default.
+    async setGcSettings(sweepInterval: number, paranoid: boolean): Promise<void> {
+        await this.ensureBooted();
+        // FIFO postMessage: sending this before run-start-source guarantees the
+        // runtime records it ahead of the ResetFade that run triggers.
+        this.post({ type: 'set-gc-settings', sweepInterval, paranoid });
+    }
 
     async loadProgram(source: string): Promise<boolean> {
         await this.ensureBooted();
@@ -624,18 +649,50 @@ class MonoGameHost {
     // calls this once per `.xnb` in the project before LoadProgram so any
     // `texture`/`load sfx clip` commands fbasic runs resolve through stock
     // ContentManager.Load<T> against the in-memory dict.
-    async registerAsset(name: string, bytes: Uint8Array): Promise<void> {
+    async registerAsset(name: string, bytes: Uint8Array, hash?: string, projectId?: string): Promise<void> {
         await this.ensureBooted();
         // Transfer the underlying buffer when possible. structuredClone
         // works either way, but transfer avoids a copy for big .xnbs.
         // Slice to a fresh buffer so any subsequent caller-side reads
-        // don't see a detached array.
+        // don't see a detached array. `hash` lets the runtime persist the
+        // asset content-addressed (IndexedDB, namespaced by projectId) +
+        // answer manifest-reconcile.
         const copy = bytes.slice();
-        this.postToIframe({ type: 'register-asset', name, bytes: copy }, [copy.buffer]);
+        this.postToIframe({ type: 'register-asset', name, hash: hash ?? '', projectId: projectId ?? '', bytes: copy }, [copy.buffer]);
+    }
+
+    /** Manifest-reconcile: hand the runtime the project id + full asset manifest
+     *  ([{name, hash, kind}]) and get back only the names it does NOT already
+     *  hold — in its live content manager / audio host, or in its persistent
+     *  IndexedDB cache (from which it re-registers locally, no page bytes). It
+     *  also prunes this project's cache down to the manifest. The caller then
+     *  registers just the returned names. This replaces the page-side
+     *  "what's registered" belief (AssetSyncCache) with the runtime as the
+     *  source of truth, so it can't desync (the "Registered: []" bug). */
+    async reconcileAssets(
+        projectId: string,
+        manifest: Array<{ name: string; hash: string; kind: string }>,
+    ): Promise<string[]> {
+        await this.ensureBooted();
+        // sentAt (wall clock, comparable across the same-origin iframe) lets the
+        // iframe handler measure how long the message sat queued behind the busy
+        // WASM main thread before it even started — see the reconcile-assets
+        // handler's [fade-timing:iframe] log.
+        const need = await this.call<unknown>({ type: 'reconcile-assets', projectId, manifest, sentAt: Date.now() }, undefined, 30_000);
+        return Array.isArray(need) ? (need as string[]) : [];
     }
 
     // Wipe the dict — used when the editor switches projects so stale assets
     // from the prior project don't bleed into the next run.
+    // Drive the loading overlay on the game canvas (best-effort, fire-and-
+    // forget). The editor shows this while registering assets on a launch so
+    // the canvas reads "Loading assets… N/M" instead of a frozen frame. The
+    // normal debug-start/begin-program flow hides it; `setSplash(_, {hide:true})`
+    // forces it down.
+    setSplash(text: string, opts: { hide?: boolean; error?: boolean } = {}): void {
+        this.post({ type: 'set-splash', text, hide: !!opts.hide, error: !!opts.error });
+    }
+
     async clearAssets(): Promise<void> {
         if (!this.isReady()) return;
         this.post({ type: 'clear-assets' });
@@ -668,11 +725,11 @@ class MonoGameHost {
      *  unblocking BeginPendingProgram. Replaces the previous XNB-wrapped
      *  audio path entirely; the iframe's window.fadeAudio is the new
      *  audio backend on browser builds. */
-    async registerAudio(name: string, bytes: Uint8Array): Promise<boolean> {
+    async registerAudio(name: string, bytes: Uint8Array, hash?: string, projectId?: string): Promise<boolean> {
         await this.ensureBooted();
         const copy = bytes.slice();
         const result = await this.call<unknown>(
-            { type: 'register-audio', name, bytes: copy },
+            { type: 'register-audio', name, hash: hash ?? '', projectId: projectId ?? '', bytes: copy },
             [copy.buffer],
         );
         // The iframe replies with a JS boolean (Blazor-style primitive
@@ -722,7 +779,10 @@ class MonoGameHost {
      *  JSON envelope. */
     async debugStart(source: string): Promise<string> {
         await this.ensureBooted();
-        return await this.call<string>({ type: 'debug-start', source });
+        // 15s ceiling: after ensureBooted a debug-start replies near-instantly;
+        // if it doesn't, the iframe's debug state is wedged (usually from a
+        // prior step→continue→stop session) and would otherwise hang forever.
+        return await this.call<string>({ type: 'debug-start', source }, undefined, 15_000);
     }
 
     /** Compile + start a debug session at a specific test's entry point.
@@ -732,7 +792,7 @@ class MonoGameHost {
      *  texture, sync, audio, …) actually have a live GraphicsDevice. */
     async debugStartTest(source: string, testName: string): Promise<string> {
         await this.ensureBooted();
-        return await this.call<string>({ type: 'debug-start-test', source, testName });
+        return await this.call<string>({ type: 'debug-start-test', source, testName }, undefined, 15_000);
     }
     async debugTerminate(): Promise<void> {
         if (!this.isReady()) return;

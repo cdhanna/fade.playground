@@ -160,8 +160,18 @@ class LocalDebugAdapter implements DebugAdapter {
             // Push assets first; the canvas runtime needs the dict
             // populated *before* the user program's texture/sfx commands
             // run inside Game1.LoadProgram.
+            const _t0 = performance.now();
             if (this.syncMonoGameAssets) await this.syncMonoGameAssets();
+            const _t1 = performance.now();
             const s = await this.monoGameHost.debugStart(source);
+            const _t2 = performance.now();
+            // Gated by fadeAssetTiming — splits the asset sync from the actual
+            // debug-start round-trip so we can see which dominates.
+            try {
+                if (localStorage.getItem('fade.assetTiming') === '1') {
+                    console.log(`[fade-timing] adapter.start: sync ${Math.round(_t1 - _t0)}ms · debugStart ${Math.round(_t2 - _t1)}ms`);
+                }
+            } catch { /* ignore */ }
             return JSON.parse(s);
         }
         if (this.ensureWebVmReady) await this.ensureWebVmReady();
