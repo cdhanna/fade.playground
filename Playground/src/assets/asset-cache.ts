@@ -63,18 +63,28 @@ export interface CacheWorkspaceLike {
 }
 
 export class AssetCache {
+    private _cachedIndex: AssetCacheIndex | null = null;
+
     constructor(private readonly workspace: CacheWorkspaceLike) {}
 
+    /** Read the index from OPFS, caching the result so a compile pass
+     *  that does 76 lookups only hits OPFS once instead of 76 times. */
     private async readIndex(): Promise<AssetCacheIndex> {
+        if (this._cachedIndex) return this._cachedIndex;
         try {
             const text = await this.workspace.read(CACHE_INDEX_PATH);
             const parsed = JSON.parse(text) as AssetCacheIndex;
-            if (parsed?.schemaVersion === 1 && Array.isArray(parsed.entries)) return parsed;
+            if (parsed?.schemaVersion === 1 && Array.isArray(parsed.entries)) {
+                this._cachedIndex = parsed;
+                return parsed;
+            }
         } catch { /* missing or malformed → start fresh */ }
-        return { ...EMPTY_INDEX, entries: [] };
+        this._cachedIndex = { ...EMPTY_INDEX, entries: [] };
+        return this._cachedIndex;
     }
 
     private async writeIndex(index: AssetCacheIndex): Promise<void> {
+        this._cachedIndex = index;
         await this.workspace.mkdir(CACHE_DIR);
         await this.workspace.write(CACHE_INDEX_PATH, JSON.stringify(index, null, 2) + '\n');
     }

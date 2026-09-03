@@ -1239,6 +1239,43 @@
             line-height: 1.4;
         }
         .settings-field-control { display: flex; }
+        .settings-license-info {
+            font-size: 0.8rem;
+            color: var(--fg-muted);
+            line-height: 1.55;
+            margin: 0 0 14px;
+            padding: 10px 12px;
+            border: 1px solid var(--border-2);
+            border-left: 3px solid var(--accent, #4daafc);
+            border-radius: 4px;
+            background: var(--bg-2);
+        }
+        .settings-license-value {
+            flex: 1;
+            min-width: 0;
+            font-size: 0.78rem;
+            color: var(--fg);
+            word-break: break-all;
+            line-height: 1.4;
+        }
+        .settings-license-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 4px;
+            flex-wrap: wrap;
+        }
+        .settings-license-actions .settings-link {
+            position: static;
+            padding: 5px 12px;
+            border: 1px solid var(--border-2);
+            border-radius: 4px;
+            color: var(--fg);
+            background: var(--bg-2);
+            font-size: 0.78rem;
+        }
+        .settings-license-actions .settings-link:hover { border-color: var(--fg-muted); }
+        .settings-license-remove { color: #f14c4c !important; }
+        .settings-license-remove:hover { color: #ff7a7a !important; }
         .settings-control {
             display: flex;
             align-items: center;

@@ -1,0 +1,98 @@
+# Deploy the Fade license minting worker (Cloudflare Worker) automatically
+# whenever its source or config changes on the production branch, including
+# blacklist.json (which is how a revocation actually ships).
+#
+# Unlike oauth-proxy, this worker holds secrets, so the deploy step writes
+# them via `wrangler secret put` before deploying. Secrets live in GitHub
+# Actions secrets (encrypted), never in the repo or wrangler.toml.
+#
+# Required repo secrets:
+#   CLOUDFLARE_API_TOKEN     — "Workers Scripts: Edit" on the account
+#   CLOUDFLARE_ACCOUNT_ID    — the account that owns fade-license
+#   LICENSE_HMAC_SECRET      — HMAC secret used to sign JWTs (>= 32 bytes)
+#   LICENSE_ADMIN_API_KEY    — bearer token for /mint and /resend
+#   LICENSE_STRIPE_SECRET_KEY — Stripe API key (sk_live_...), for /webhook + /resend
+#   LICENSE_STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret (whsec_...)
+#   LICENSE_RESEND_API_KEY   — Resend API key (re_...), for key emails
+#
+# FROM_EMAIL / PLAYGROUND_URL / UUID_NAMESPACE are non-secret and ship via
+# wrangler.toml [vars], so no secret needed for them.
+
+name: Deploy License Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'license-server/**'
+      - '.github/workflows/deploy-license-server.yml'
+  # Manual re-deploys (e.g. rotating HMAC_SECRET) without a file change.
+  workflow_dispatch:
+
+# Never let two deploys of the same worker race.
+concurrency:
+  group: deploy-license-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: license-server/package-lock.json
+
+      - name: Install
+        working-directory: license-server
+        run: npm ci
+
+      # Push the secrets into the worker's encrypted secret store BEFORE
+      # deploy so the freshly-uploaded script has them available on first
+      # request. `wrangler secret put` reads the value from stdin.
+      - name: Set HMAC_SECRET
+        working-directory: license-server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: echo "${{ secrets.LICENSE_HMAC_SECRET }}" | npx wrangler secret put HMAC_SECRET --name fade-license
+
+      - name: Set ADMIN_API_KEY
+        working-directory: license-server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: echo "${{ secrets.LICENSE_ADMIN_API_KEY }}" | npx wrangler secret put ADMIN_API_KEY --name fade-license
+
+      - name: Set STRIPE_SECRET_KEY
+        working-directory: license-server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: echo "${{ secrets.LICENSE_STRIPE_SECRET_KEY }}" | npx wrangler secret put STRIPE_SECRET_KEY --name fade-license
+
+      - name: Set STRIPE_WEBHOOK_SECRET
+        working-directory: license-server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: echo "${{ secrets.LICENSE_STRIPE_WEBHOOK_SECRET }}" | npx wrangler secret put STRIPE_WEBHOOK_SECRET --name fade-license
+
+      - name: Set RESEND_API_KEY
+        working-directory: license-server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: echo "${{ secrets.LICENSE_RESEND_API_KEY }}" | npx wrangler secret put RESEND_API_KEY --name fade-license
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: license-server
+          command: deploy

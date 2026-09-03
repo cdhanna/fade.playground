@@ -1,0 +1,21 @@
+{
+    "name": "fade-license",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Cloudflare Worker that mints free-form JWTs for the Fade Playground license system. No storage — every key is derived deterministically from (email, version).",
+    "scripts": {
+        "dev": "wrangler dev",
+        "deploy": "wrangler deploy",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "smoke": "node scripts/smoke.mjs",
+        "tail": "wrangler tail"
+    },
+    "devDependencies": {
+        "@cloudflare/workers-types": "^4.20250101.0",
+        "@types/node": "^20.0.0",
+        "typescript": "^5.5.0",
+        "vitest": "^2.0.0",
+        "wrangler": "^3.90.0"
+    }
+}

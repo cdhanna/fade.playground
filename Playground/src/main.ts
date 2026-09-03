@@ -142,6 +142,15 @@ import { createProjectAwareLspEditValidator } from './ai/adapters/lsp-validate-e
 import { PLAYGROUND_VERSION } from './changelog';
 import { maybeShowChangelogPopup, setFullChangelogOpener } from './version-popup';
 import {
+    applyLicenseFromUrl,
+    fetchBlacklist,
+    recordCompile,
+    recordExport,
+    setLicenseConfig,
+    showLicenseDialog,
+    type LicenseConfig,
+} from './license';
+import {
     extractInsIndex,
     hideCrashOverlay,
     showCrashOverlay,
@@ -6222,6 +6231,7 @@ async function bootstrap() {
         settingsPanelHandle = mountSettingsPanel({
             container: settingsHost,
             getProjectName: () => workspace.currentProject(),
+            showLicenseDialog: () => showLicenseDialog(),
         });
     }
 
@@ -8309,6 +8319,28 @@ async function bootstrap() {
         maybeShowChangelogPopup();
     }
 
+    // License system (Sublime-style nagware — nothing is gated). Import a
+    // ?key=<jwt> from the URL on boot, config the license server, and
+    // prefetch the blacklist so a later nag decision is already current.
+    {
+        const licenseHost = (import.meta.env.VITE_LICENSE_SERVER_URL as string | undefined)?.replace(/\/$/, '');
+        // The buy URL is a Stripe Payment Link (Stripe hosts the checkout),
+        // independent of the license server. Fall back to <host>/buy only as a
+        // dev convenience where a checkout endpoint is served on the worker.
+        const buyUrl = (import.meta.env.VITE_LICENSE_BUY_URL as string | undefined)
+            ?? (licenseHost ? licenseHost + '/buy' : undefined);
+        const config: LicenseConfig | null = (licenseHost || buyUrl) ? {
+            buyUrl: buyUrl ?? '',
+            blacklistUrl: licenseHost ? licenseHost + '/blacklist.json' : '',
+            telemetryUrl: licenseHost ? licenseHost + '/telemetry' : '',
+        } : null;
+        if (config) {
+            setLicenseConfig(config);
+            if (licenseHost) void fetchBlacklist();
+        }
+        applyLicenseFromUrl();
+    }
+
     // Populate the Diagnostics panel version rows from the worker runtime.
     void runner.getVersionInfo().then((info) => {
         if (!info) return;
@@ -9939,9 +9971,23 @@ async function bootstrap() {
         ].sort();
         const sourceFiles = names.filter((n) => /\.(fbasic|fb)$/i.test(n)).sort();
         const _fpParts: string[] = [`enc:${ENCODER_VERSION}`];
-        for (const p of [...sourceFiles, ...assetSourcePaths]) {
-            const meta = _l1Hit ? null : await workspace.statMeta(p);
-            _fpParts.push(`${p} ${meta ? `${meta.size}@${meta.lastModified}` : 'x'}`);
+        // Parallelise OPFS stats — serial round-trips were the dominant
+        // cost on L1-miss for large projects (100+ files × ~5ms each).
+        const allPaths = [...sourceFiles, ...assetSourcePaths];
+        const BATCH = 20;
+        const metas: ({ size: number; lastModified: number } | null)[] = _l1Hit
+            ? allPaths.map(() => null)
+            : [];
+        if (!_l1Hit) {
+            for (let i = 0; i < allPaths.length; i += BATCH) {
+                const batch = allPaths.slice(i, i + BATCH);
+                const results = await Promise.all(batch.map((p) => workspace.statMeta(p)));
+                metas.push(...results);
+            }
+        }
+        for (let i = 0; i < allPaths.length; i++) {
+            const meta = metas[i];
+            _fpParts.push(`${allPaths[i]} ${meta ? `${meta.size}@${meta.lastModified}` : 'x'}`);
         }
         const assetFingerprint = _fpParts.join('');
 
@@ -10379,8 +10425,12 @@ async function bootstrap() {
                 try { await monoGameHost.setGcSettings(gc?.sweepInterval ?? 0, gc?.paranoid ?? false); }
                 catch { /* iframe not ready — runtime falls back to defaults */ }
             }
+            // A "compile" is whatever a Run does to get the program going; we
+            // track it at the launch dispatch (optionally gated on compile
+            // success below) so a single toast/tab click counts once, instead
+            // of hooking each framework's internal compile call sites.
             if (mode === 'debug') await startDebug();
-            else await runOnce();
+            else { recordCompile(); await runOnce(); }
         } finally {
             launchInFlight = false;
         }
@@ -10918,6 +10968,7 @@ async function bootstrap() {
                 a.click();
                 document.body.removeChild(a);
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
+                recordExport();
                 appendOutputLine(`Exported: ${name} (${(zipBytes.length / 1024).toFixed(0)} KB)`, 'info');
             } catch (e: any) {
                 appendOutputLine('Export failed: ' + (e?.message ?? String(e)), 'error');
@@ -11027,6 +11078,7 @@ async function bootstrap() {
             document.body.removeChild(a);
             // Revoke after a tick so the click has fully dispatched.
             setTimeout(() => URL.revokeObjectURL(url), 1000);
+            recordExport();
             appendOutputLine(`Exported: ${name} (${(zipBytes.length / 1024).toFixed(0)} KB)`, 'info');
         } catch (e: any) {
             appendOutputLine('Export failed: ' + (e?.message ?? String(e)), 'error');

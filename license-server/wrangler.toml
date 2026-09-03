@@ -1,0 +1,29 @@
+# Cloudflare Worker config for the Fade license system.
+#
+# This worker mints HMAC-SHA256 JWTs that the Fade Playground decodes
+# from localStorage. It holds NO user data — every key is derived
+# deterministically from (email, version), so there's nothing to store.
+#
+# Secrets (HMAC_SECRET, STRIPE_*, RESEND_*, ADMIN_API_KEY) are set via
+# `wrangler secret put`, NOT in this file. See README.md for deploy steps.
+
+name = "fade-license"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# `workers.dev` subdomain is the free-tier default — no custom domain
+# needed for this to work.
+workers_dev = true
+
+# Non-secret configuration. HMAC_SECRET and the API keys are NOT here;
+# set them with `wrangler secret put`.
+[vars]
+UUID_NAMESPACE = "fade-licenses"
+FROM_EMAIL = "keys@brewed.ink"
+FROM_NAME = "Fade"
+EMAIL_SUBJECT = "Your Fade license"
+PLAYGROUND_URL = "https://playground.fadebasic.com"
+# Resend published template alias that carries the {{{KEY}}} variable.
+RESEND_TEMPLATE_ALIAS = "fade-purchase"
+# Your inbox — gets a BCC copy of every key email.
+OWNER_EMAIL = "chris@brewed.ink"

@@ -18,18 +18,26 @@ import {
     replaceUserSettings,
     replaceWorkspaceSettings,
 } from './settings';
+import {
+    clearLicense,
+    getBuyUrl,
+    getLicense,
+    readUsage,
+} from './license';
 
 export interface SettingsPanelDeps {
     container: HTMLElement;
     // Current project name, surfaced in the Workspace tab header so users
     // know which project they're editing.
     getProjectName: () => string;
+    // Opens the license dialog (used by the License tab's "Enter Key" action).
+    showLicenseDialog: () => void;
 }
 
-type Scope = 'user' | 'workspace';
+type Scope = 'user' | 'workspace' | 'license';
 
 export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; dispose(): void } {
-    const { container, getProjectName } = deps;
+    const { container, getProjectName, showLicenseDialog } = deps;
 
     container.innerHTML = '';
     const root = document.createElement('div');
@@ -40,7 +48,8 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
     tabs.className = 'settings-tabs';
     const userTab = makeTab('User', 'user');
     const wsTab = makeTab('Workspace', 'workspace');
-    tabs.append(userTab, wsTab);
+    const licTab = makeTab('License', 'license');
+    tabs.append(userTab, wsTab, licTab);
     root.appendChild(tabs);
 
     const body = document.createElement('div');
@@ -84,12 +93,106 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
     }
 
     function render() {
-        if (!currentState) return;
         userTab.classList.toggle('active', activeScope === 'user');
         wsTab.classList.toggle('active', activeScope === 'workspace');
+        licTab.classList.toggle('active', activeScope === 'license');
 
+        if (activeScope === 'license') { renderLicense(); return; }
+        if (!currentState) return;
         if (viewMode === 'form') renderForm();
         else renderJson();
+    }
+
+    function renderLicense() {
+        disposeJsonEditor();
+        body.innerHTML = '';
+
+        const header = document.createElement('div');
+        header.className = 'settings-header';
+        header.innerHTML = '<span class="settings-header-title">License</span>'
+            + '<span class="settings-header-sub">Fade is free — a license is a way to support development.</span>';
+        body.appendChild(header);
+
+        // Match the other settings views: all content lives in a .settings-form
+        // wrapper so padding/spacing is identical to the User/Workspace tabs.
+        const form = document.createElement('div');
+        form.className = 'settings-form';
+        body.appendChild(form);
+
+        const intro = document.createElement('div');
+        intro.className = 'settings-license-info';
+        intro.textContent = 'No features are locked or gated — nothing changes if you don\'t buy. '
+            + 'A paid license is a thank-you that helps keep Fade going. '
+            + 'Check out securely and your license key is emailed to you instantly; '
+            + 'paste it below (or open the emailed link) and you\'re all set.';
+        form.appendChild(intro);
+
+        const section = document.createElement('div');
+        section.className = 'settings-section';
+
+        const status = getLicense();
+        const usage = readUsage();
+        const rawKey = (() => { try { return localStorage.getItem('fade.license'); } catch { return null; } })();
+
+        section.appendChild(field('Status', status ? 'Licensed' : 'Not licensed'));
+        section.appendChild(field('Licensed to', status?.email ?? '—'));
+        section.appendChild(field('Usage', `${usage.exports} export${usage.exports === 1 ? '' : 's'}, ${usage.compiles} compile${usage.compiles === 1 ? '' : 's'}`));
+        section.appendChild(field('License key', status ? (rawKey ?? '—') : '—'));
+        form.appendChild(section);
+
+        const actions = document.createElement('div');
+        actions.className = 'settings-license-actions';
+
+        const enterBtn = document.createElement('button');
+        enterBtn.type = 'button';
+        enterBtn.className = 'settings-link';
+        enterBtn.textContent = status ? 'Change key' : 'Enter a key';
+        enterBtn.addEventListener('click', () => showLicenseDialog());
+        actions.appendChild(enterBtn);
+
+        const buyUrl = getBuyUrl();
+        if (buyUrl) {
+            const buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'settings-link';
+            buyBtn.textContent = 'Buy a license';
+            buyBtn.addEventListener('click', () => window.open(buyUrl, '_blank', 'noopener'));
+            actions.appendChild(buyBtn);
+        }
+
+        if (status) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'settings-link settings-license-remove';
+            removeBtn.textContent = 'Remove license';
+            removeBtn.addEventListener('click', () => {
+                clearLicense();
+                render();
+            });
+            actions.appendChild(removeBtn);
+        }
+
+        form.appendChild(actions);
+    }
+
+    function field(label: string, value: string): HTMLElement {
+        const row = document.createElement('div');
+        row.className = 'settings-field';
+        const labelWrap = document.createElement('div');
+        labelWrap.className = 'settings-field-label';
+        const l = document.createElement('div');
+        l.className = 'settings-field-label-text';
+        l.textContent = label;
+        labelWrap.appendChild(l);
+        row.appendChild(labelWrap);
+        const controlWrap = document.createElement('div');
+        controlWrap.className = 'settings-field-control';
+        const v = document.createElement('div');
+        v.className = 'settings-license-value';
+        v.textContent = value;
+        controlWrap.appendChild(v);
+        row.appendChild(controlWrap);
+        return row;
     }
 
     function renderForm() {

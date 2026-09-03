@@ -25,6 +25,13 @@ on:
         required: true
       CLOUDFLARE_ACCOUNT_ID:
         required: true
+      # Baked into the site at build time (import.meta.env.VITE_LICENSE_*).
+      # Optional: if either is empty/missing the license nag system just
+      # ships inert (no buy button, no blacklist fetch).
+      VITE_LICENSE_BUY_URL:
+        required: false
+      VITE_LICENSE_SERVER_URL:
+        required: false
 
 jobs:
   deploy:
@@ -62,6 +69,9 @@ jobs:
 
       - name: Build site
         working-directory: Playground
+        env:
+          VITE_LICENSE_BUY_URL: ${{ secrets.VITE_LICENSE_BUY_URL }}
+          VITE_LICENSE_SERVER_URL: ${{ secrets.VITE_LICENSE_SERVER_URL }}
         run: npm run build
 
       - name: Deploy to Cloudflare Pages (branch=${{ inputs.branch }})

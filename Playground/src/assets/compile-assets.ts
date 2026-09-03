@@ -246,18 +246,54 @@ export async function compileImageAssetsWithPlan(
         normalizeCompression(plan.defaultCompression) ?? 'auto';
 
     const liveSourcePaths = new Set<string>();
+    const validPaths: string[] = [];
     for (const path of imageSources) {
         if (!isImageSourcePath(path)) continue;
         liveSourcePaths.add(path);
+        validPaths.push(path);
+    }
 
+    // Pre-fetch all source bytes + hashes in parallel batches.
+    // Serial OPFS reads were the dominant cost for large projects.
+    const BATCH = 20;
+    const sourceDataMap = new Map<string, { bytes: Uint8Array; hash: string }>();
+    {
+        const fetches: Promise<void>[] = [];
+        for (let i = 0; i < validPaths.length; i += BATCH) {
+            const batch = validPaths.slice(i, i + BATCH);
+            for (const p of batch) {
+                fetches.push(
+                    (async () => {
+                        const bytes = await workspace.readBytes(p);
+                        const hash = await sha256Hex(bytes);
+                        sourceDataMap.set(p, { bytes, hash });
+                    })().catch(() => { sourceDataMap.set(p, null as any); }),
+                );
+            }
+            await Promise.all(fetches.splice(0));
+        }
+        if (fetches.length) await Promise.all(fetches);
+    }
+
+    for (const path of validPaths) {
         const assetName = assetNameForSourcePath(path);
         const planValue = planByKey.get(assetName) ?? planByKey.get(path) ?? '';
         const requested =
             normalizeCompression(planValue) ?? defaultCompression;
 
         try {
-            const sourceBytes = await workspace.readBytes(path);
-            const sourceHash = await sha256Hex(sourceBytes);
+            const data = sourceDataMap.get(path);
+            if (!data) {
+                diagnostics.push({
+                    severity: 'error',
+                    assetName,
+                    sourcePath: path,
+                    message: 'asset read failed',
+                });
+                continue;
+            }
+            const sourceBytes = data.bytes;
+            const sourceHash = data.hash;
 
             const cached = await lookupCache(cache, assetName, sourceHash, requested);
             if (cached) {
@@ -397,7 +433,28 @@ export async function compileAudioAssetsWithPlan(
         if (entry.path && entry.path !== entry.name) planByKey.set(entry.path, value);
     }
 
-    for (const path of audioSources) {
+    const audioPaths = [...audioSources];
+    const BATCH = 20;
+    const audioDataMap = new Map<string, { bytes: Uint8Array; hash: string }>();
+    {
+        const fetches: Promise<void>[] = [];
+        for (let i = 0; i < audioPaths.length; i += BATCH) {
+            const batch = audioPaths.slice(i, i + BATCH);
+            for (const p of batch) {
+                fetches.push(
+                    (async () => {
+                        const bytes = await workspace.readBytes(p);
+                        const hash = await sha256Hex(bytes);
+                        audioDataMap.set(p, { bytes, hash });
+                    })().catch(() => { audioDataMap.set(p, null as any); }),
+                );
+            }
+            await Promise.all(fetches.splice(0));
+        }
+        if (fetches.length) await Promise.all(fetches);
+    }
+
+    for (const path of audioPaths) {
         const assetName = assetNameForSourcePath(path);
         const planValue = planByKey.get(assetName) ?? planByKey.get(path) ?? '';
         // The plan's defaultCompression is texture-flavoured today; audio
@@ -405,8 +462,13 @@ export async function compileAudioAssetsWithPlan(
         // just fall back to 'auto' here.
         const requested = normalizeAudioCompression(planValue) ?? 'auto';
         try {
-            const sourceBytes = await workspace.readBytes(path);
-            const sourceHash = await sha256Hex(sourceBytes);
+            const data = audioDataMap.get(path);
+            if (!data) {
+                diagnostics.push({ severity: 'error', assetName, sourcePath: path, message: 'asset read failed' });
+                continue;
+            }
+            const sourceBytes = data.bytes;
+            const sourceHash = data.hash;
 
             // Cache key uses the *requested* format so 'auto' and 'pcm'
             // cache separately even when auto resolves to PCM — keeps the
@@ -500,7 +562,28 @@ export async function compileFontAssetsWithPlan(
     const diagnostics: AssetDiagnostic[] = [];
     const assets: CompiledFontAsset[] = [];
 
-    for (const path of fontSources) {
+    const fontPaths = [...fontSources];
+    const BATCH = 20;
+    const fontDataMap = new Map<string, { bytes: Uint8Array; hash: string }>();
+    {
+        const fetches: Promise<void>[] = [];
+        for (let i = 0; i < fontPaths.length; i += BATCH) {
+            const batch = fontPaths.slice(i, i + BATCH);
+            for (const p of batch) {
+                fetches.push(
+                    (async () => {
+                        const bytes = await workspace.readBytes(p);
+                        const hash = await sha256Hex(bytes);
+                        fontDataMap.set(p, { bytes, hash });
+                    })().catch(() => { fontDataMap.set(p, null as any); }),
+                );
+            }
+            await Promise.all(fetches.splice(0));
+        }
+        if (fetches.length) await Promise.all(fetches);
+    }
+
+    for (const path of fontPaths) {
         const assetName = assetNameForSourcePath(path);
         const sizePx = fontSizeFromPlan(plan, assetName, path);
         // Cache format key encodes the chosen size so changing the
@@ -508,8 +591,13 @@ export async function compileFontAssetsWithPlan(
         const formatKey = `spritefont-${sizePx}`;
 
         try {
-            const sourceBytes = await workspace.readBytes(path);
-            const sourceHash = await sha256Hex(sourceBytes);
+            const data = fontDataMap.get(path);
+            if (!data) {
+                diagnostics.push({ severity: 'error', assetName, sourcePath: path, message: 'asset read failed' });
+                continue;
+            }
+            const sourceBytes = data.bytes;
+            const sourceHash = data.hash;
 
             const hit = await cache.lookup(assetName, sourceHash, formatKey, ENCODER_VERSION);
             if (hit) {
@@ -589,7 +677,28 @@ export async function compileShaderAssetsWithPlan(
     const diagnostics: AssetDiagnostic[] = [];
     const assets: CompiledShaderAsset[] = [];
 
-    for (const path of shaderSources) {
+    const shaderPaths = [...shaderSources];
+    const BATCH = 20;
+    const shaderDataMap = new Map<string, { bytes: Uint8Array; hash: string }>();
+    {
+        const fetches: Promise<void>[] = [];
+        for (let i = 0; i < shaderPaths.length; i += BATCH) {
+            const batch = shaderPaths.slice(i, i + BATCH);
+            for (const p of batch) {
+                fetches.push(
+                    (async () => {
+                        const bytes = await workspace.readBytes(p);
+                        const hash = await sha256Hex(bytes);
+                        shaderDataMap.set(p, { bytes, hash });
+                    })().catch(() => { shaderDataMap.set(p, null as any); }),
+                );
+            }
+            await Promise.all(fetches.splice(0));
+        }
+        if (fetches.length) await Promise.all(fetches);
+    }
+
+    for (const path of shaderPaths) {
         const assetName = assetNameForSourcePath(path);
         // Single shader format key for now — when we plumb compile flags
         // (debug-vs-optimize, target-profile) through the macro pass this
@@ -597,8 +706,13 @@ export async function compileShaderAssetsWithPlan(
         const formatKey = 'shader-mgfx-v10';
 
         try {
-            const sourceBytes = await workspace.readBytes(path);
-            const sourceHash = await sha256Hex(sourceBytes);
+            const data = shaderDataMap.get(path);
+            if (!data) {
+                diagnostics.push({ severity: 'error', assetName, sourcePath: path, message: 'asset read failed' });
+                continue;
+            }
+            const sourceBytes = data.bytes;
+            const sourceHash = data.hash;
 
             const hit = await cache.lookup(assetName, sourceHash, formatKey, ENCODER_VERSION);
             if (hit) {
