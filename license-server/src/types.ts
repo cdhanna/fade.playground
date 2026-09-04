@@ -1,12 +1,15 @@
 export interface Env {
     // Secrets (set via `wrangler secret put`)
-    HMAC_SECRET: string;
+    /** base64 PKCS8 Ed25519 private key — signs minted JWTs. Never shipped. */
+    LICENSE_PRIVATE_KEY: string;
     ADMIN_API_KEY: string;
     STRIPE_SECRET_KEY?: string;
     STRIPE_WEBHOOK_SECRET?: string;
     RESEND_API_KEY?: string;
 
     // Non-secret (wrangler.toml [vars])
+    /** base64 raw Ed25519 public key — verifies JWTs; safe to expose. */
+    LICENSE_PUBLIC_KEY: string;
     UUID_NAMESPACE: string;
     FROM_EMAIL: string;
     /** Friendly "from" display name, rendered as `Name <FROM_EMAIL>` */

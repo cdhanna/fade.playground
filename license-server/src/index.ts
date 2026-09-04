@@ -63,7 +63,7 @@ async function mint(env: Env, email: string, iat: number, opts: { name?: string;
         ver: 1,
         version,
     };
-    const jwt = await signJwt(payload, env.HMAC_SECRET);
+    const jwt = await signJwt(payload, env.LICENSE_PRIVATE_KEY);
     return { jwt, identity, version };
 }
 
@@ -194,6 +194,19 @@ function handleBlacklist(): Response {
     });
 }
 
+/** GET /public-key */
+function handlePublicKey(env: Env): Response {
+    return new Response(JSON.stringify({ publicKey: env.LICENSE_PUBLIC_KEY }), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            // Public — cache long so the Playground's verifier has it available
+            // and flips to "Licensed" without a network round-trip each load.
+            'Cache-Control': 'public, max-age=3600',
+        },
+    });
+}
+
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
@@ -202,6 +215,7 @@ export default {
 
         if (method === 'GET' && pathname === '/health') return json({ ok: true });
         if (method === 'GET' && pathname === '/blacklist.json') return handleBlacklist();
+        if (method === 'GET' && pathname === '/public-key') return handlePublicKey(env);
 
         if (method === 'POST' && pathname === '/mint') return handleMint(env, request);
         if (method === 'POST' && pathname === '/webhook') return handleWebhook(env, request);

@@ -1,11 +1,13 @@
 # Cloudflare Worker config for the Fade license system.
 #
-# This worker mints HMAC-SHA256 JWTs that the Fade Playground decodes
-# from localStorage. It holds NO user data — every key is derived
-# deterministically from (email, version), so there's nothing to store.
+# This worker mints Ed25519-signed JWTs that the Fade Playground verifies
+# against the public key (LICENSE_PUBLIC_KEY below). It holds NO user data —
+# every key is derived deterministically from (email, version), so there's
+# nothing to store.
 #
-# Secrets (HMAC_SECRET, STRIPE_*, RESEND_*, ADMIN_API_KEY) are set via
+# Secrets (LICENSE_PRIVATE_KEY, STRIPE_*, RESEND_*, ADMIN_API_KEY) are set via
 # `wrangler secret put`, NOT in this file. See README.md for deploy steps.
+# Generate the keypair with: node scripts/generate-keys.mjs
 
 name = "fade-license"
 main = "src/index.ts"
@@ -15,9 +17,11 @@ compatibility_date = "2025-01-01"
 # needed for this to work.
 workers_dev = true
 
-# Non-secret configuration. HMAC_SECRET and the API keys are NOT here;
-# set them with `wrangler secret put`.
+# Non-secret configuration. LICENSE_PRIVATE_KEY and the API keys are NOT here;
+# set them with `wrangler secret put`. LICENSE_PUBLIC_KEY is public — it's the
+# verify-only half of the Ed25519 pair and is exposed via GET /public-key.
 [vars]
+LICENSE_PUBLIC_KEY = "cQ3delXFiT/EP7OTkY+Kn7LUd2tfAfkR2DW1++xW50Y="
 UUID_NAMESPACE = "fade-licenses"
 FROM_EMAIL = "keys@brewed.ink"
 FROM_NAME = "Fade"

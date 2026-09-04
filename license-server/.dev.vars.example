@@ -1,16 +1,18 @@
 # Local dev secrets (never committed — .dev.vars is gitignored).
 # Copy this file to `.dev.vars` (wrangler reads .dev.vars in `npm run dev`),
-# then fill in real values. Generate your own throwaway secret for HMAC_SECRET
-# and ADMIN_API_KEY; use Stripe TEST keys and a Resend key while developing.
+# then fill in real values. Generate a throwaway Ed25519 keypair for
+# LICENSE_PRIVATE_KEY / LICENSE_PUBLIC_KEY (and an ADMIN_API_KEY); use Stripe
+# TEST keys and a Resend key while developing.
 #
-#   % openssl rand -hex 16      # for HMAC_SECRET
+#   % node scripts/generate-keys.mjs     # prints both halves + a wrangler cmd
 #
 # Run `npm run dev`, then:
 #   curl -X POST http://localhost:8787/mint \
 #     -H "Authorization: Bearer dev-admin" \
 #     -d '{"email":"buyer@example.com"}'
 
-HMAC_SECRET=change-me-generate-with-openssl-rand-hex-16
+LICENSE_PRIVATE_KEY=change-me-base64-pkcs8-ed25519-private-key
+LICENSE_PUBLIC_KEY=change-me-base64-raw-ed25519-public-key
 ADMIN_API_KEY=dev-admin-key
 STRIPE_SECRET_KEY=sk_test_xxxxxxxxxxxxxxxxxxxxxxxx
 STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

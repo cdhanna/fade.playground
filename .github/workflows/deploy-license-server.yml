@@ -9,7 +9,7 @@
 # Required repo secrets:
 #   CLOUDFLARE_API_TOKEN     — "Workers Scripts: Edit" on the account
 #   CLOUDFLARE_ACCOUNT_ID    — the account that owns fade-license
-#   LICENSE_HMAC_SECRET      — HMAC secret used to sign JWTs (>= 32 bytes)
+#   LICENSE_PRIVATE_KEY      — base64 PKCS8 Ed25519 private key (signs JWTs; from `node scripts/generate-keys.mjs`)
 #   LICENSE_ADMIN_API_KEY    — bearer token for /mint and /resend
 #   LICENSE_STRIPE_SECRET_KEY — Stripe API key (sk_live_...), for /webhook + /resend
 #   LICENSE_STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret (whsec_...)
@@ -26,7 +26,7 @@ on:
     paths:
       - 'license-server/**'
       - '.github/workflows/deploy-license-server.yml'
-  # Manual re-deploys (e.g. rotating HMAC_SECRET) without a file change.
+  # Manual re-deploys (e.g. rotating the signing key) without a file change.
   workflow_dispatch:
 
 # Never let two deploys of the same worker race.
@@ -54,12 +54,12 @@ jobs:
       # Push the secrets into the worker's encrypted secret store BEFORE
       # deploy so the freshly-uploaded script has them available on first
       # request. `wrangler secret put` reads the value from stdin.
-      - name: Set HMAC_SECRET
+      - name: Set LICENSE_PRIVATE_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_HMAC_SECRET }}" | npx wrangler secret put HMAC_SECRET --name fade-license
+        run: echo "${{ secrets.LICENSE_PRIVATE_KEY }}" | npx wrangler secret put LICENSE_PRIVATE_KEY --name fade-license
 
       - name: Set ADMIN_API_KEY
         working-directory: license-server

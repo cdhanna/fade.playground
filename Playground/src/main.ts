@@ -143,7 +143,10 @@ import { PLAYGROUND_VERSION } from './changelog';
 import { maybeShowChangelogPopup, setFullChangelogOpener } from './version-popup';
 import {
     applyLicenseFromUrl,
+    ensureVerified,
     fetchBlacklist,
+    hasLicense,
+    onLicenseChange,
     recordCompile,
     recordExport,
     setLicenseConfig,
@@ -8319,9 +8322,32 @@ async function bootstrap() {
         maybeShowChangelogPopup();
     }
 
-    // License system (Sublime-style nagware — nothing is gated). Import a
-    // ?key=<jwt> from the URL on boot, config the license server, and
-    // prefetch the blacklist so a later nag decision is already current.
+    // Mount the top-bar Trial/Licensed badge. Renders the current state,
+    // then stays in sync with the license manager (store/clear/verify via
+    // onLicenseChange). Clicking opens the license dialog. NO-OPs when the
+    // element or a license server config is absent.
+    function mountLicenseBadge(): void {
+        const el = document.getElementById('license-status-pill');
+        if (!el) return;
+        const render = () => {
+            const licensed = hasLicense();
+            el.classList.toggle('license-status-trial', !licensed);
+            el.classList.toggle('license-status-licensed', licensed);
+            el.textContent = licensed ? 'Licensed' : 'Trial';
+            el.title = licensed
+                ? 'License verified — thank you for supporting Fade'
+                : 'Trial — support Fade with a license';
+        };
+        render();
+        onLicenseChange(render);
+        el.addEventListener('click', () => showLicenseDialog());
+    }
+
+    // License system (Sublime-style nagware — nothing is gated). Configure
+    // the license manager from env (buy URL + license server host, public
+    // key), then kick off stored-key verification, import any ?key= from the
+    // URL, and mount the top-bar Trial/Licensed badge. We also prefetch the
+    // blacklist so a later nag decision is already current.
     {
         const licenseHost = (import.meta.env.VITE_LICENSE_SERVER_URL as string | undefined)?.replace(/\/$/, '');
         // The buy URL is a Stripe Payment Link (Stripe hosts the checkout),
@@ -8329,16 +8355,21 @@ async function bootstrap() {
         // dev convenience where a checkout endpoint is served on the worker.
         const buyUrl = (import.meta.env.VITE_LICENSE_BUY_URL as string | undefined)
             ?? (licenseHost ? licenseHost + '/buy' : undefined);
-        const config: LicenseConfig | null = (licenseHost || buyUrl) ? {
+        const publicKey = import.meta.env.VITE_LICENSE_PUBLIC_KEY as string | undefined;
+        const config: LicenseConfig | null = (licenseHost || buyUrl || publicKey) ? {
             buyUrl: buyUrl ?? '',
             blacklistUrl: licenseHost ? licenseHost + '/blacklist.json' : '',
             telemetryUrl: licenseHost ? licenseHost + '/telemetry' : '',
+            publicKey: publicKey ?? undefined,
+            publicKeyUrl: licenseHost ? licenseHost + '/public-key' : '',
         } : null;
         if (config) {
             setLicenseConfig(config);
             if (licenseHost) void fetchBlacklist();
         }
-        applyLicenseFromUrl();
+        void applyLicenseFromUrl();
+        void ensureVerified();
+        mountLicenseBadge();
     }
 
     // Populate the Diagnostics panel version rows from the worker runtime.

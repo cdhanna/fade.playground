@@ -60,7 +60,6 @@ async function main() {
     const envVars = loadEnvVars();
     const admin = envVars.ADMIN_API_KEY || 'dev-admin-key';
     const whSecret = envVars.STRIPE_WEBHOOK_SECRET;
-    const hmac = envVars.HMAC_SECRET;
 
     console.log(`Smoke-testing ${BASE}\n`);
 

@@ -6,11 +6,12 @@
 // stored in localStorage. Keys are purely informational — a valid key just
 // stops the nag. No feature ever checks it for authorization.
 //
-// The JWT is NOT verified here (HMAC verification would need the shared
-// secret). We only need its payload (`sub`, `email`, `name`) for identity /
-// blacklisting / telemetry, so we decode it client-side. The server-side
-// signature matters only if we later add server-side verification; the minted
-// token is what we receive from the canonical source, not from the user.
+// The JWT IS verified client-side with an Ed25519 PUBLIC key (RFC 8032), so a
+// forged key is rejected even though it could never gate functionality. Only
+// the license-server holds the private key; the client keeps only the public
+// half and rejects any JWT whose signature doesn't check out (anti-minting).
+// The public key comes from the embedded `publicKey` config or is fetched
+// from `publicKeyUrl` (the worker's GET /public-key) on demand.
 //
 // Behavior:
 //   - applyLicenseFromUrl()  → import ?key=<jwt> on boot, save, strip param
@@ -26,6 +27,18 @@ const USAGE_KEY = 'fade.licenseUsage';
 // "every 300th compile" knobs from the plan.
 const EXPORT_NAG_INTERVAL = 3;
 const COMPILE_NAG_INTERVAL = 500;
+
+// localStorage accessors for the license JWT (kept side-by-side so the
+// verification code above can read/write/clear without duplicating try/catch).
+function readStoredKey(): string | null {
+    try { return localStorage.getItem(LICENSE_KEY); } catch { return null; }
+}
+function setStoredKey(jwt: string): void {
+    try { localStorage.setItem(LICENSE_KEY, jwt); } catch { /* ignore */ }
+}
+function clearStoredKey(): void {
+    try { localStorage.removeItem(LICENSE_KEY); } catch { /* ignore */ }
+}
 
 export interface UsageCounts {
     exports: number;
@@ -91,36 +104,154 @@ export function decodeJwtPayload(jwt: string): LicensePayload | null {
     }
 }
 
-function isValidJwt(jwt: string): boolean {
-    return decodeJwtPayload(jwt) !== null;
-}
-
 export function hasLicense(): boolean {
-    try {
-        const jwt = localStorage.getItem(LICENSE_KEY);
-        return !!jwt && isValidJwt(jwt);
-    } catch {
-        return false;
-    }
+    return verifiedPayload !== null;
 }
 
 export function getLicense(): LicensePayload | null {
+    return verifiedPayload;
+}
+
+// Ed25519 public key verification. `verifiedPayload` holds the last key that
+// passed signature verification; a forged/stale key never reaches it, so the
+// UI and nag logic only ever see real licenses.
+let verifiedPayload: LicensePayload | null = null;
+let verificationPromise: Promise<void> | null = null;
+
+// Ensure we've attempted to verify the stored key at least once. Sync
+// callers (nag / badge) can rely on this being settled before they act.
+export function ensureVerified(): Promise<void> {
+    if (verificationPromise) return verificationPromise;
+    verificationPromise = (async () => {
+        const jwt = readStoredKey();
+        if (!jwt) return;
+        const payload = await verifyAndDecode(jwt);
+        if (payload) {
+            verifiedPayload = payload;
+        } else if (await getPublicKey()) {
+            // A public key is configured and the stored key failed to verify
+            // → it's forged/stale. Drop it and go unlicensed. When no public
+            // key is available we can't form a verdict, so we leave the key
+            // untouched (it just isn't trusted this session).
+            clearStoredKey();
+        }
+    })().finally(() => {
+        verificationPromise = null;
+    });
+    return verificationPromise;
+}
+
+export async function storeLicense(jwt: string): Promise<boolean> {
+    if (!decodeJwtPayload(jwt)) return false;
+    const payload = await verifyAndDecode(jwt);
+    if (!payload) return false; // not a valid Ed25519-signed JWT → reject
+    setStoredKey(jwt);
+    verifiedPayload = payload;
+    emitLicenseChange();
+    return true;
+}
+
+export function clearLicense(): void {
+    verifiedPayload = null;
+    clearStoredKey();
+    emitLicenseChange();
+}
+
+// ── Ed25519 verification ───────────────────────────────────────────────
+
+// Resolve the Ed25519 public key: embedded config first, else fetch the
+// worker's /public-key endpoint. Cached after the first successful read.
+let cachedPublicKey: string | null = null;
+async function getPublicKey(): Promise<string | null> {
+    if (cachedPublicKey) return cachedPublicKey;
+    if (config?.publicKey) {
+        cachedPublicKey = config.publicKey;
+        return cachedPublicKey;
+    }
+    if (config?.publicKeyUrl) {
+        try {
+            const res = await fetch(config.publicKeyUrl, { cache: 'no-store' });
+            if (res.ok) {
+                const data = (await res.json()) as { publicKey?: string };
+                if (data.publicKey) {
+                    cachedPublicKey = data.publicKey;
+                    return cachedPublicKey;
+                }
+            }
+        } catch {
+            /* fall through → no public key, cannot verify */
+        }
+    }
+    return null;
+}
+
+// Decode then cryptographically verify a JWT against the Ed25519 public key.
+// Returns the payload only if the signature is authentic, else null.
+async function verifyAndDecode(jwt: string): Promise<LicensePayload | null> {
+    const payload = decodeJwtPayload(jwt);
+    if (!payload) return null;
+    const pub = await getPublicKey();
+    if (!pub) return null;
     try {
-        const jwt = localStorage.getItem(LICENSE_KEY);
-        if (!jwt) return null;
-        return decodeJwtPayload(jwt);
+        const ok = await verifyEd25519(jwt, pub);
+        return ok ? payload : null;
     } catch {
         return null;
     }
 }
 
-export function storeLicense(jwt: string): void {
-    if (!isValidJwt(jwt)) return;
-    try { localStorage.setItem(LICENSE_KEY, jwt); } catch { /* ignore */ }
+function b64urlToBytes(b64url: string): Uint8Array<ArrayBuffer> {
+    const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? 0 : 4 - (b64.length % 4);
+    const bin = atob(b64 + '='.repeat(pad));
+    const out = new Uint8Array(new ArrayBuffer(bin.length));
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
 }
 
-export function clearLicense(): void {
-    try { localStorage.removeItem(LICENSE_KEY); } catch { /* ignore */ }
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
+    const bin = atob(b64);
+    const out = new Uint8Array(new ArrayBuffer(bin.length));
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+async function verifyEd25519(jwt: string, publicKeyBase64: string): Promise<boolean> {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return false;
+    if (!crypto?.subtle) return false;
+    const key = await crypto.subtle.importKey(
+        'raw',
+        base64ToBytes(publicKeyBase64),
+        { name: 'Ed25519' },
+        false,
+        ['verify'],
+    );
+    const sig = b64urlToBytes(parts[2]);
+    const enc = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+    const data = new Uint8Array(new ArrayBuffer(enc.length));
+    data.set(enc);
+    return crypto.subtle.verify(
+        'Ed25519',
+        key,
+        sig,
+        data,
+    );
+}
+
+// ── Change notifications ────────────────────────────────────────────────
+// Fired whenever the stored license changes (store/clear). Lets live UI like
+// the Settings License tab re-render immediately instead of waiting for the
+// next tab switch. Returns an unsubscribe fn.
+const licenseListeners = new Set<() => void>();
+
+function emitLicenseChange(): void {
+    for (const cb of licenseListeners) cb();
+}
+
+export function onLicenseChange(cb: () => void): () => void {
+    licenseListeners.add(cb);
+    return () => { licenseListeners.delete(cb); };
 }
 
 // ── Telemetry ──────────────────────────────────────────────────────────
@@ -181,103 +312,118 @@ const NAG_CSS = `
     z-index: 1300;
 }
 .license-nag-modal {
-    width: min(480px, 92vw);
+    width: min(460px, 92vw);
     background: var(--bg-1);
     border: 1px solid var(--border-2);
-    border-radius: 10px;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+    border-radius: 6px;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.55);
     overflow: hidden;
-    animation: license-nag-in 140ms ease-out;
-}
-@keyframes license-nag-in {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-.license-nag-accent {
-    height: 3px;
-    background: linear-gradient(90deg, #0e639c, #4daafc);
-}
-.license-nag-body-wrap {
-    padding: 1.4rem 1.5rem 1.2rem;
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
+    animation: license-nag-in 120ms ease-out;
+}
+@keyframes license-nag-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.license-nag-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0.75rem 0.95rem;
+    border-bottom: 1px solid var(--border-2);
+    background: var(--bg-2);
 }
 .license-nag-kicker {
     font-size: 0.7rem;
     font-weight: 600;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--fg-muted);
 }
 .license-nag-title {
-    font-size: 1.15rem;
-    font-weight: 650;
+    font-size: 0.95rem;
+    font-weight: 600;
     color: var(--fg);
-    line-height: 1.25;
+    line-height: 1.3;
+}
+.license-nag-body-wrap {
+    padding: 0.95rem 0.95rem 0.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
 }
 .license-nag-body {
-    font-size: 0.84rem;
+    font-size: 0.82rem;
+    color: var(--fg);
+    line-height: 1.5;
+}
+.license-nag-body-muted {
+    font-size: 0.78rem;
     color: var(--fg-muted);
-    line-height: 1.55;
+    line-height: 1.45;
 }
 .license-nag-divider {
     height: 1px;
     background: var(--border-2);
-    margin: 0.1rem 0;
+}
+.license-nag-steps-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--fg-muted);
 }
 .license-nag-steps {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.4rem;
     margin: 0;
     padding: 0;
     list-style: none;
 }
 .license-nag-step {
     display: flex;
-    align-items: flex-start;
-    gap: 0.55rem;
-    font-size: 0.82rem;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
     color: var(--fg);
-    line-height: 1.45;
+    line-height: 1.4;
 }
 .license-nag-step::before {
-    content: "✓";
+    content: "";
     flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    margin-top: 0.05rem;
+    width: 16px;
+    height: 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 50%;
-    background: rgba(76,175,80,0.16);
-    color: #4caf50;
-    font-size: 0.68rem;
+    border-radius: 3px;
+    background: rgba(0,127,212,0.15);
+    color: #007fd4;
+    font-size: 0.7rem;
     font-weight: 700;
 }
+.license-nag-step.ok::before { content: "✓"; }
 .license-nag-foot {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    padding: 0.9rem 1.5rem 1.1rem;
-    border-top: 1px solid var(--border-2);
-    background: var(--bg-2);
+    padding: 0.85rem 0.95rem 0.95rem;
+    margin-top: 0.2rem;
+    flex-wrap: wrap;
 }
 .license-nag-actions {
     display: flex;
-    gap: 0.55rem;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 .license-nag-btn {
     font: inherit;
-    font-size: 0.82rem;
-    font-weight: 550;
-    padding: 0.42rem 1rem;
-    border-radius: 5px;
+    font-size: 0.8rem;
+    padding: 0.32rem 0.9rem;
+    border-radius: 3px;
     border: 1px solid var(--border-2);
-    background: var(--bg-1);
+    background: var(--bg-2);
     color: var(--fg);
     cursor: pointer;
     transition: border-color 120ms ease, background 120ms ease;
@@ -288,10 +434,8 @@ const NAG_CSS = `
     border-color: #0e639c;
     color: #fff;
 }
-.license-nag-primary:hover {
-    background: #1177bb;
-    border-color: #1177bb;
-}
+.license-nag-primary:hover { background: #1177bb; border-color: #1177bb; }
+.license-nag-primary:focus-visible { outline: 1px solid #fff; outline-offset: 1px; }
 .license-nag-link {
     background: none;
     border: none;
@@ -302,28 +446,46 @@ const NAG_CSS = `
     padding: 0;
 }
 .license-nag-link:hover { color: var(--fg); }
-.license-nag-key-row {
+
+/* ── Dedicated "enter your key" view ─────────────────────────────────── */
+.license-enter-body {
+    padding: 1rem 0.95rem;
     display: flex;
-    gap: 0.4rem;
-    margin-top: 0.2rem;
+    flex-direction: column;
+    gap: 0.8rem;
 }
-.license-nag-key-input {
-    flex: 1;
-    font: inherit;
-    font-size: 0.8rem;
-    padding: 0.35rem 0.55rem;
-    border: 1px solid var(--border-2);
-    border-radius: 5px;
-    background: var(--bg-1);
-    color: var(--fg);
-}
-.license-nag-key-input:focus { outline: none; border-color: var(--accent, #4daafc); }
-.license-nag-key-hint {
-    font-size: 0.76rem;
+.license-enter-label {
+    font-size: 0.78rem;
+    font-weight: 600;
     color: var(--fg-muted);
-    margin-top: 0.3rem;
 }
-.license-nag-confirm { font-size: 0.78rem; }
+.license-enter-input {
+    box-sizing: border-box;
+    width: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--fg);
+    background: var(--bg-1);
+    border: 1px solid var(--border-2);
+    border-radius: 3px;
+    padding: 10px 12px;
+    outline: none;
+    word-break: break-all;
+}
+.license-enter-input::placeholder { color: var(--fg-muted); }
+.license-enter-input:focus { border-color: #007fd4; }
+.license-enter-hint {
+    font-size: 0.74rem;
+    color: var(--fg-muted);
+    line-height: 1.4;
+}
+.license-enter-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+    flex-wrap: wrap;
+}
 `;
 
 function ensureNagCss(): void {
@@ -340,6 +502,11 @@ export interface LicenseConfig {
     buyUrl: string;
     blacklistUrl: string;
     telemetryUrl: string;
+    // Ed25519 public key used to verify license JWTs. Either embed
+    // `publicKey` (base64 raw 32-byte RFC 8032 key) for an offline override,
+    // or point `publicKeyUrl` at the worker's GET /public-key endpoint.
+    publicKey?: string;
+    publicKeyUrl: string;
 }
 
 let config: LicenseConfig | null = null;
@@ -355,11 +522,19 @@ export function getBuyUrl(): string | null {
 
 let nagOpen = false;
 
-function showNagDialog(event: 'export' | 'compile', count: number): void {
-    if (nagOpen) return;
-    ensureNagCss();
-    const cfg = config;
+interface LicenseDialog {
+    overlay: HTMLElement;
+    modal: HTMLElement;
+    kicker: HTMLElement;
+    title: HTMLElement;
+    body: HTMLElement;
+    foot: HTMLElement;
+    dismiss: () => void;
+    setEscape: (fn: (() => void) | null) => void;
+}
 
+function openLicenseDialog(): LicenseDialog {
+    ensureNagCss();
     const overlay = document.createElement('div');
     overlay.className = 'license-nag-overlay';
 
@@ -368,82 +543,24 @@ function showNagDialog(event: 'export' | 'compile', count: number): void {
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
 
-    const accent = document.createElement('div');
-    accent.className = 'license-nag-accent';
-
-    const bodyWrap = document.createElement('div');
-    bodyWrap.className = 'license-nag-body-wrap';
-
+    // Header band (matches the app's changelog/confirm dialogs).
+    const head = document.createElement('div');
+    head.className = 'license-nag-head';
     const kicker = document.createElement('div');
     kicker.className = 'license-nag-kicker';
-    kicker.textContent = 'Fade Playground';
-
     const title = document.createElement('div');
     title.className = 'license-nag-title';
-    title.textContent = hasLicense()
-        ? 'Thank you for supporting Fade'
-        : 'Support Fade’s development';
+    head.append(kicker, title);
 
-    // Core messaging: nothing is gated; a license is a thank-you.
-    const premise = document.createElement('div');
-    premise.className = 'license-nag-body';
-    premise.textContent = hasLicense()
-        ? 'Your library has been used a great deal. If you’ve found Fade useful, a license is the best way to keep development going.'
-        : `You’ve ${event === 'export' ? `exported ${count} times` : `compiled ${count} times`}. Fade is free, and it will stay free — no features are locked or gated. A paid license is purely a way to say thanks and help keep the project going.`;
-
-    const divider = document.createElement('div');
-    divider.className = 'license-nag-divider';
-
-    // How the purchase works.
-    const stepsTitle = document.createElement('div');
-    stepsTitle.className = 'license-nag-body';
-    stepsTitle.textContent = 'Here’s how it works:';
-
-    const steps = document.createElement('ul');
-    steps.className = 'license-nag-steps';
-    const stepDefs = [
-        'Check out securely — no account needed.',
-        'Your license key is emailed to you instantly.',
-        'Paste it in Settings > License, or click the link, and you’re all set.',
-    ];
-    for (const s of stepDefs) {
-        const li = document.createElement('li');
-        li.className = 'license-nag-step';
-        li.textContent = s;
-        steps.appendChild(li);
-    }
-
+    // Content + footer get replaced per-view; both live under the modal.
+    const body = document.createElement('div');
     const foot = document.createElement('div');
     foot.className = 'license-nag-foot';
 
-    const actions = document.createElement('div');
-    actions.className = 'license-nag-actions';
+    modal.append(head, body, foot);
 
-    // Build the "enter key" expandable row (input + Apply button). The input
-    // gets a fixed id so handlers can reach it via lookup instead of through
-    // closure narrowing (TS keeps `let` as its initializer type across
-    // function boundaries).
-    const KEY_INPUT_ID = 'license-nag-key-input';
-    const buildKeyRow = (): HTMLElement => {
-        const row = document.createElement('div');
-        row.className = 'license-nag-key-row';
-        const input = document.createElement('input');
-        input.className = 'license-nag-key-input';
-        input.id = KEY_INPUT_ID;
-        input.placeholder = 'Paste your key here…';
-        input.spellcheck = false;
-        const confirmBtn = document.createElement('button');
-        confirmBtn.className = 'license-nag-btn license-nag-confirm';
-        confirmBtn.textContent = 'Apply';
-        confirmBtn.addEventListener('click', tryApply);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryApply(); });
-        row.append(input, confirmBtn);
-        const hint = document.createElement('div');
-        hint.className = 'license-nag-key-hint';
-        hint.textContent = 'Your key was emailed to you after purchase.';
-        row.appendChild(hint);
-        return row;
-    };
+    let escapeHandler: (() => void) | null = null;
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') escapeHandler?.(); };
 
     const dismiss = () => {
         nagOpen = false;
@@ -451,52 +568,233 @@ function showNagDialog(event: 'export' | 'compile', count: number): void {
         document.removeEventListener('keydown', onKeyDown);
     };
 
-    const tryApply = () => {
-        const input = document.getElementById(KEY_INPUT_ID) as HTMLInputElement | null;
-        if (input && input.value.trim()) storeLicense(input.value.trim());
-        dismiss();
-    };
-
-    const enterBtn = document.createElement('button');
-    enterBtn.className = 'license-nag-btn';
-    enterBtn.textContent = 'Enter Key';
-    enterBtn.addEventListener('click', () => {
-        // Once the key row has been rendered once, the button's behavior
-        // becomes "apply the entered key" rather than "reveal the row".
-        if (document.getElementById(KEY_INPUT_ID)) { tryApply(); return; }
-        // Swap the Enter Key button for the key row while editing.
-        enterBtn.replaceWith(buildKeyRow());
-        (document.getElementById(KEY_INPUT_ID) as HTMLInputElement | null)?.focus();
-    });
-
-    // Buy button
-    const buyBtn = document.createElement('button');
-    buyBtn.className = 'license-nag-btn license-nag-primary';
-    buyBtn.textContent = 'Buy a license';
-    buyBtn.addEventListener('click', () => {
-        if (cfg?.buyUrl) window.open(cfg.buyUrl, '_blank', 'noopener');
-    });
-
-    // Dismiss link (bottom-left, subtle)
-    const dismissLink = document.createElement('button');
-    dismissLink.className = 'license-nag-link';
-    dismissLink.textContent = 'Not now';
-    dismissLink.addEventListener('click', dismiss);
-
-    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') dismiss(); };
-
-    actions.append(enterBtn, buyBtn);
-    foot.append(dismissLink, actions);
-
-    bodyWrap.append(kicker, title, premise, divider, stepsTitle, steps);
-    modal.append(accent, bodyWrap, foot);
     overlay.appendChild(modal);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
     document.addEventListener('keydown', onKeyDown);
     document.body.appendChild(overlay);
 
     nagOpen = true;
-    buyBtn.focus();
+
+    return {
+        overlay,
+        modal,
+        kicker,
+        title,
+        body,
+        foot,
+        dismiss,
+        setEscape(fn: (() => void) | null) { escapeHandler = fn; },
+    };
+}
+
+function showNagDialog(event: 'export' | 'compile', count: number): void {
+    if (nagOpen) return;
+    const cfg = config;
+    const shell = openLicenseDialog();
+    const { kicker, title, body, foot, dismiss } = shell;
+
+    const KEY_INPUT_ID = 'license-nag-key-input';
+
+    const applyKey = async () => {
+        const input = document.getElementById(KEY_INPUT_ID) as HTMLInputElement | null;
+        const raw = input?.value.trim() ?? '';
+        if (!raw) return;
+        // Successful application → swap to the thank-you view (also fires on
+        // the Settings tab via the license-change subscription). storeLicense
+        // verifies the Ed25519 signature and rejects a forged key.
+        if (await storeLicense(raw)) renderThankYou();
+    };
+
+    // ── "Pitch" view: the persuade/thank-you card ──────────────────────
+    function renderPitch(): void {
+        kicker.textContent = 'Fade Playground';
+        title.textContent = hasLicense()
+            ? 'Thank you for supporting Fade'
+            : 'Support Fade’s development';
+
+        body.className = 'license-nag-body-wrap';
+        body.replaceChildren();
+        const premise = document.createElement('div');
+        premise.className = 'license-nag-body';
+        premise.textContent = hasLicense()
+            ? 'Your library has been used a great deal. If you’ve found Fade useful, a license is the best way to keep development going.'
+            : `You’ve ${event === 'export' ? `exported ${count} times` : `compiled ${count} times`}. Fade is free, and it will stay free — no features are locked or gated. A paid license is purely a way to say thanks and help keep the project going.`;
+        body.appendChild(premise);
+
+        const divider = document.createElement('div');
+        divider.className = 'license-nag-divider';
+        body.appendChild(divider);
+
+        const stepsTitle = document.createElement('div');
+        stepsTitle.className = 'license-nag-steps-title';
+        stepsTitle.textContent = 'Here’s how it works:';
+        body.appendChild(stepsTitle);
+
+        const steps = document.createElement('ul');
+        steps.className = 'license-nag-steps';
+        for (const s of [
+            'Check out securely — no account needed.',
+            'Your license key is emailed to you instantly.',
+            'Paste it in Settings > License, or click the link, and you’re all set.',
+        ]) {
+            const li = document.createElement('li');
+            li.className = 'license-nag-step ok';
+            li.textContent = s;
+            steps.appendChild(li);
+        }
+        body.appendChild(steps);
+
+        // Footer actions.
+        const actions = document.createElement('div');
+        actions.className = 'license-nag-actions';
+
+        const enterBtn = document.createElement('button');
+        enterBtn.type = 'button';
+        enterBtn.className = 'license-nag-btn';
+        enterBtn.textContent = 'Enter Key';
+        enterBtn.addEventListener('click', () => { renderEnter(); enterBtn.focus(); });
+        actions.appendChild(enterBtn);
+
+        let primaryBtn = enterBtn;
+        if (cfg?.buyUrl) {
+            const buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'license-nag-btn license-nag-primary';
+            buyBtn.textContent = 'Buy a license';
+            buyBtn.addEventListener('click', () => window.open(cfg.buyUrl!, '_blank', 'noopener'));
+            actions.appendChild(buyBtn);
+            primaryBtn = buyBtn;
+        }
+
+        foot.replaceChildren();
+        const dismissLink = document.createElement('button');
+        dismissLink.className = 'license-nag-link';
+        dismissLink.textContent = 'Not now';
+        dismissLink.addEventListener('click', dismiss);
+        foot.append(dismissLink, actions);
+
+        shell.setEscape(dismiss);
+        primaryBtn.focus();
+    }
+
+    // ── "Enter key" view: a single-purpose, comfortable key entry ─────
+    function renderEnter(): void {
+        kicker.textContent = 'Fade Playground';
+        title.textContent = 'Enter your license key';
+
+        body.className = 'license-enter-body';
+        body.replaceChildren();
+
+        const label = document.createElement('div');
+        label.className = 'license-enter-label';
+        label.textContent = 'License key';
+        body.appendChild(label);
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = KEY_INPUT_ID;
+        input.className = 'license-enter-input';
+        input.placeholder = 'Paste your key here…';
+        input.spellcheck = false;
+        input.autocomplete = 'off';
+        input.autocapitalize = 'off';
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyKey(); });
+        body.appendChild(input);
+
+        const hint = document.createElement('div');
+        hint.className = 'license-enter-hint';
+        hint.textContent = 'Your key was emailed to you right after purchase. You can also open the emailed link to activate automatically.';
+        body.appendChild(hint);
+
+        const actions = document.createElement('div');
+        actions.className = 'license-enter-actions';
+
+        const backBtn = document.createElement('button');
+        backBtn.type = 'button';
+        backBtn.className = 'license-nag-btn';
+        backBtn.textContent = 'Back';
+        backBtn.addEventListener('click', () => renderPitch());
+        actions.appendChild(backBtn);
+
+        const applyBtn = document.createElement('button');
+        applyBtn.type = 'button';
+        applyBtn.className = 'license-nag-btn license-nag-primary';
+        applyBtn.textContent = 'Apply';
+        applyBtn.addEventListener('click', applyKey);
+        actions.appendChild(applyBtn);
+
+        foot.replaceChildren(actions);
+        shell.setEscape(renderPitch);
+        input.focus();
+    }
+
+    // ── "Thank you" view: shown after a successful activation ─────────
+    function renderThankYou(): void {
+        kicker.textContent = 'Fade Playground';
+        title.textContent = 'Thank you for supporting Fade';
+
+        body.className = 'license-nag-body-wrap';
+        body.replaceChildren();
+        const message = document.createElement('div');
+        message.className = 'license-nag-body';
+        message.textContent = 'Your license is active. Fade stays free for everyone — thank you for helping keep development going.';
+        const sub = document.createElement('div');
+        sub.className = 'license-nag-body-muted';
+        sub.textContent = 'You’ll find your key under Settings > License. No features are gated or affected.';
+        body.append(message, sub);
+
+        foot.replaceChildren();
+        const actions = document.createElement('div');
+        actions.className = 'license-nag-actions';
+        const doneBtn = document.createElement('button');
+        doneBtn.type = 'button';
+        doneBtn.className = 'license-nag-btn license-nag-primary';
+        doneBtn.textContent = 'Done';
+        doneBtn.addEventListener('click', dismiss);
+        actions.appendChild(doneBtn);
+        foot.appendChild(actions);
+
+        shell.setEscape(dismiss);
+        doneBtn.focus();
+    }
+
+    renderPitch();
+}
+
+// Open a standalone "thank you" popup after a successful activation, e.g.
+// when the emailed ?key= link is opened on boot. Only fired for a real,
+// just-applied token — never on a bare page load with no key.
+export function showThankYouDialog(): void {
+    if (nagOpen) return;
+    const shell = openLicenseDialog();
+    const { kicker, title, body, foot, dismiss } = shell;
+
+    kicker.textContent = 'Fade Playground';
+    title.textContent = 'Thank you for supporting Fade';
+
+    body.className = 'license-nag-body-wrap';
+    body.replaceChildren();
+    const message = document.createElement('div');
+    message.className = 'license-nag-body';
+    message.textContent = 'Your license is active. Fade stays free for everyone — thank you for helping keep development going.';
+    const sub = document.createElement('div');
+    sub.className = 'license-nag-body-muted';
+    sub.textContent = 'You’ll find your key under Settings > License. No features are gated or affected.';
+    body.append(message, sub);
+
+    foot.replaceChildren();
+    const actions = document.createElement('div');
+    actions.className = 'license-nag-actions';
+    const doneBtn = document.createElement('button');
+    doneBtn.type = 'button';
+    doneBtn.className = 'license-nag-btn license-nag-primary';
+    doneBtn.textContent = 'Done';
+    doneBtn.addEventListener('click', dismiss);
+    actions.appendChild(doneBtn);
+    foot.appendChild(actions);
+
+    shell.setEscape(dismiss);
+    doneBtn.focus();
 }
 
 // ── Usage recording + nag triggering ───────────────────────────────────
@@ -522,6 +820,11 @@ export async function maybeNag(kind: 'export' | 'compile'): Promise<void> {
     // Fetch the blacklist (cached after the first call) so revoked keys are
     // treated as unlicensed rather than passed as valid.
     await fetchBlacklist();
+
+    // Make sure a stored (but not-yet-verified) key is verified before we
+    // decide whether to nag — otherwise a fresh reload could nag a licensed
+    // user while the async verification is still in flight.
+    await ensureVerified();
 
     const payload = getLicense();
     if (payload && !isBlacklisted(payload.sub)) {
@@ -559,7 +862,7 @@ export function recordCompile(): void {
 // On boot: if the URL carries ?key=<jwt>, validate + store it, then strip the
 // query param (history.replaceState) so the key isn't left in the address
 // bar / history / shared links. If it's a fresh activation, notify telemetry.
-export function applyLicenseFromUrl(): void {
+export async function applyLicenseFromUrl(): Promise<void> {
     try {
         const url = new URL(window.location.href);
         const key = url.searchParams.get('key');
@@ -567,13 +870,19 @@ export function applyLicenseFromUrl(): void {
 
         const payload = decodeJwtPayload(key);
         if (!payload) return;
-        storeLicense(key);
+        // Verifies the Ed25519 signature; a forged key is rejected here.
+        if (!(await storeLicense(key))) return;
 
-        // Remove the secret param from the URL without a full reload.
+        // Remove the secret param from the URL without a full reload. Doing
+        // this up front also means a reload won't re-fire the welcome popup.
         url.searchParams.delete('key');
         window.history.replaceState(null, '', url.toString());
 
         pingTelemetry(payload.sub, 'activate');
+
+        // Show the "thank you" popup for a fresh link activation. Deferred a
+        // tick so the page's CSS variables/theming are mounted before render.
+        setTimeout(() => showThankYouDialog(), 0);
     } catch {
         /* best effort */
     }

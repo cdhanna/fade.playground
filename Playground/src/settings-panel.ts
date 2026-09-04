@@ -23,6 +23,7 @@ import {
     getBuyUrl,
     getLicense,
     readUsage,
+    onLicenseChange,
 } from './license';
 
 export interface SettingsPanelDeps {
@@ -72,6 +73,12 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         // wipe their text. The form auto-refreshes when they switch back.
         if (viewMode === 'json' && jsonEditor) return;
         render();
+    });
+
+    // Re-render the License tab live when the stored key changes (e.g. the
+    // user enters a key via the dialog) instead of waiting for a tab switch.
+    const unsubscribeLicense = onLicenseChange(() => {
+        if (activeScope === 'license') render();
     });
 
     function makeTab(label: string, scope: Scope): HTMLButtonElement {
@@ -134,10 +141,52 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         const usage = readUsage();
         const rawKey = (() => { try { return localStorage.getItem('fade.license'); } catch { return null; } })();
 
-        section.appendChild(field('Status', status ? 'Licensed' : 'Not licensed'));
-        section.appendChild(field('Licensed to', status?.email ?? '—'));
-        section.appendChild(field('Usage', `${usage.exports} export${usage.exports === 1 ? '' : 's'}, ${usage.compiles} compile${usage.compiles === 1 ? '' : 's'}`));
-        section.appendChild(field('License key', status ? (rawKey ?? '—') : '—'));
+        section.appendChild(field(
+            'Status',
+            status ? 'Licensed' : 'Not licensed',
+            status
+                ? 'An active license is stored on this browser.'
+                : 'Nothing is locked without one — a license is purely a thank-you.',
+        ));
+        section.appendChild(field(
+            'Licensed to',
+            status?.email ?? '—',
+            'The email this license was issued to (from the activation email link).',
+        ));
+        if (status) {
+            section.appendChild(field(
+                'Minted',
+                formatMintDate(status.iat),
+                'The date this license key was issued (the token “iat” timestamp).',
+            ));
+
+            // The numeric "version" baked into the deterministic identity UUID
+            // (sub = v5(namespace, `${email}:${version}`)) — distinguishes
+            // replacement keys after a revoke/rotate.
+            section.appendChild(field(
+                'Version',
+                String(status.version ?? status.ver ?? 1),
+                'The identity-revision baked into your key. A replacement key after a revoke bumps this.',
+            ));
+
+            // API key "schema" version — hardcoded to 1 for now.
+            section.appendChild(field(
+                'API key version',
+                String(status.ver ?? 1),
+                'The license-signing format used to issue this key. Currently always 1.',
+            ));
+        }
+        section.appendChild(field(
+            'Usage',
+            `${usage.exports} export${usage.exports === 1 ? '' : 's'}, ${usage.compiles} compile${usage.compiles === 1 ? '' : 's'}`,
+            'Lifetime project exports and runs on this browser. A friendly nudge appears now and then.',
+        ));
+
+        if (status && rawKey) {
+            section.appendChild(licenseKeyField(rawKey));
+        } else {
+            section.appendChild(field('License key', '—', 'Paste your emailed key here, or open the link from your email.'));
+        }
         form.appendChild(section);
 
         const actions = document.createElement('div');
@@ -175,7 +224,7 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         form.appendChild(actions);
     }
 
-    function field(label: string, value: string): HTMLElement {
+    function field(label: string, value: string, desc?: string): HTMLElement {
         const row = document.createElement('div');
         row.className = 'settings-field';
         const labelWrap = document.createElement('div');
@@ -184,6 +233,12 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         l.className = 'settings-field-label-text';
         l.textContent = label;
         labelWrap.appendChild(l);
+        if (desc) {
+            const d = document.createElement('div');
+            d.className = 'settings-field-desc';
+            d.textContent = desc;
+            labelWrap.appendChild(d);
+        }
         row.appendChild(labelWrap);
         const controlWrap = document.createElement('div');
         controlWrap.className = 'settings-field-control';
@@ -193,6 +248,70 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         controlWrap.appendChild(v);
         row.appendChild(controlWrap);
         return row;
+    }
+
+    // Same layout as field(), but accepts an arbitrary control node (e.g. the
+    // truncated key block) instead of a plain string value.
+    function fieldNode(label: string, control: HTMLElement, desc?: string): HTMLElement {
+        const row = document.createElement('div');
+        row.className = 'settings-field';
+        const labelWrap = document.createElement('div');
+        labelWrap.className = 'settings-field-label';
+        const l = document.createElement('div');
+        l.className = 'settings-field-label-text';
+        l.textContent = label;
+        labelWrap.appendChild(l);
+        if (desc) {
+            const d = document.createElement('div');
+            d.className = 'settings-field-desc';
+            d.textContent = desc;
+            labelWrap.appendChild(d);
+        }
+        row.appendChild(labelWrap);
+        const controlWrap = document.createElement('div');
+        controlWrap.className = 'settings-field-control';
+        controlWrap.appendChild(control);
+        row.appendChild(controlWrap);
+        return row;
+    }
+
+    // The license key shown as a code block, truncated to a fingerprint by
+    // default with a copy button and a reveal-the-full-key toggle.
+    function licenseKeyField(rawKey: string): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.className = 'settings-license-key';
+
+        const code = document.createElement('code');
+        code.className = 'settings-license-key-code';
+        code.textContent = fingerprint(rawKey);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'settings-link settings-license-key-copy';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', () => {
+            void navigator.clipboard.writeText(rawKey).then(() => {
+                copyBtn.textContent = 'Copied';
+                setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1600);
+            });
+        });
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'settings-link settings-license-key-toggle';
+        toggle.textContent = 'Show full key';
+        toggle.addEventListener('click', () => {
+            const reveal = code.textContent === fingerprint(rawKey);
+            code.textContent = reveal ? rawKey : fingerprint(rawKey);
+            toggle.textContent = reveal ? 'Hide key' : 'Show full key';
+        });
+
+        wrap.append(code, copyBtn, toggle);
+        return fieldNode(
+            'License key',
+            wrap,
+            'Copy this key, or reveal the full value, and keep it somewhere safe. Remove resets the app to unlicensed.',
+        );
     }
 
     function renderForm() {
@@ -480,6 +599,7 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
         },
         dispose() {
             unsubscribe();
+            unsubscribeLicense();
             disposeJsonEditor();
         },
     };
@@ -492,3 +612,23 @@ function escapeHtml(s: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 }
+
+// Unix epoch seconds → a friendly local date (or "—" if absent/bogus).
+function formatMintDate(iat: number | undefined): string {
+    if (typeof iat !== 'number' || !isFinite(iat) || iat <= 0) return '—';
+    const d = new Date(iat * 1000);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+// A short, unambiguous fingerprint of a JWT (header + last 6 of the sig) so
+// the full key isn't on screen. Safe to keep JWT-truncated — this is a
+// display shim, not a security boundary.
+function fingerprint(jwt: string): string {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return jwt;
+    const head = parts[0].slice(0, 10);
+    const tail = parts[2].slice(-6);
+    return `${head}…${tail}`;
+}
+

@@ -747,6 +747,36 @@
             color:        var(--chip-conflict-fg, #f88);
             border-color: var(--chip-conflict-border, rgba(244,67,54,0.4));
         }
+        /* License status badge — a compact pill in the top bar, next to the
+           sharing/live chips. "Trial" by default; flips to "Licensed" once a
+           verified Ed25519 key is installed. Mirrors the sharing-chip pill
+           shape; clicking opens the license dialog. */
+        .license-status-pill {
+            appearance: none;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            padding: 2px 9px;
+            font: inherit;
+            font-size: 11px;
+            line-height: 16px;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            transition: box-shadow 80ms ease;
+        }
+        .license-status-pill:hover {
+            box-shadow: 0 0 0 2px var(--accent);
+        }
+        .license-status-trial {
+            background: var(--chip-remote-bg, rgba(77, 166, 255, 0.18));
+            color: var(--chip-remote-fg, #4da6ff);
+            border-color: var(--chip-remote-border, rgba(77,166,255,0.35));
+        }
+        .license-status-licensed {
+            background:   var(--chip-unsaved-bg, rgba(255, 183, 77, 0.18));
+            color:        var(--chip-unsaved-fg, #ffb74d);
+            border-color: var(--chip-unsaved-border, rgba(255,183,77,0.35));
+        }
         /* Live-session pill — sits next to sharing chips. Visible only
            when a session is in flight; clicking opens the Live Session
            panel. Shows one dot per peer, color-coded by their identity. */
@@ -1276,6 +1306,40 @@
         .settings-license-actions .settings-link:hover { border-color: var(--fg-muted); }
         .settings-license-remove { color: #f14c4c !important; }
         .settings-license-remove:hover { color: #ff7a7a !important; }
+        .settings-license-key {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+        .settings-license-key-code {
+            font-family: var(--mono-font, ui-monospace, 'SF Mono', Consolas, monospace);
+            font-size: 0.74rem;
+            color: var(--fg);
+            background: var(--bg-2);
+            border: 1px solid var(--border-2);
+            border-radius: 4px;
+            padding: 4px 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 260px;
+            min-width: 0;
+            user-select: all;
+        }
+        .settings-license-key .settings-link {
+            position: static;
+            padding: 2px 6px;
+            border: 1px solid var(--border-2);
+            border-radius: 3px;
+            color: var(--fg-muted);
+            background: var(--bg-2);
+            font-size: 0.7rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .settings-license-key .settings-link:hover { border-color: var(--fg-muted); color: var(--fg); }
         .settings-control {
             display: flex;
             align-items: center;
@@ -5752,6 +5816,15 @@
                      same element grows into a peer-pill strip — the icon stays
                      at the leading edge throughout. -->
                 <div id="live-session-chip" class="live-session-chip live-session-chip-idle"></div>
+                <!-- License status badge: "Trial" until a verified license
+                     is installed, then "Licensed". Click opens the license
+                     dialog. -->
+                <button id="license-status-pill"
+                        class="license-status-pill license-status-trial"
+                        type="button"
+                        title="Trial — support Fade with a license">
+                    Trial
+                </button>
             </div>
             <span class="grow"></span>
             <!-- Action buttons, right-anchored (see .header-actions). -->

@@ -3,12 +3,13 @@ import worker from '../src/index';
 import type { Env } from '../src/types';
 import { deriveIdentity } from '../src/uuid';
 import { verifyJwt, decodeJwt } from '../src/jwt';
+import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY } from './keys';
 
-const HMAC = 'test-hmac-secret-abcdef0123456789';
 const ADMIN = 'test-admin-key';
 
 const env: Env = {
-    HMAC_SECRET: HMAC,
+    LICENSE_PRIVATE_KEY: TEST_PRIVATE_KEY,
+    LICENSE_PUBLIC_KEY: TEST_PUBLIC_KEY,
     ADMIN_API_KEY: ADMIN,
     STRIPE_SECRET_KEY: '', // not used in these tests
     STRIPE_WEBHOOK_SECRET: '',
@@ -62,7 +63,7 @@ describe('license worker', () => {
         expect(res.status).toBe(200);
         const { jwt, identity } = (await res.json()) as { jwt: string; identity: string };
 
-        expect(await verifyJwt(jwt, HMAC)).toBe(true);
+        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY)).toBe(true);
         const decoded = decodeJwt(jwt);
         expect(decoded?.email).toBe('buyer@example.com');
         expect(decoded?.sub).toBe(identity);

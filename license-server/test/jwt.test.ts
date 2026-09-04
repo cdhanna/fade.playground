@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { signJwt, decodeJwt, verifyJwt } from '../src/jwt';
+import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY } from './keys';
 
-const SECRET = 'test-secret-key-that-is-long-enough';
-
-describe('jwt', () => {
+describe('jwt (Ed25519)', () => {
     it('signs, decodes, and verifies a payload', async () => {
         const payload = {
             sub: '550e8400-e29b-41d4-a716-446655440000',
@@ -12,9 +11,9 @@ describe('jwt', () => {
             ver: 1,
             version: 1,
         };
-        const jwt = await signJwt(payload, SECRET);
+        const jwt = await signJwt(payload, TEST_PRIVATE_KEY);
         expect(jwt.split('.')).toHaveLength(3);
-        expect(await verifyJwt(jwt, SECRET)).toBe(true);
+        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY)).toBe(true);
         const decoded = decodeJwt(jwt);
         expect(decoded).toMatchObject({
             sub: payload.sub,
@@ -26,16 +25,24 @@ describe('jwt', () => {
 
     it('rejects tampered payloads', async () => {
         const payload = { sub: 'foo', email: 'a@b.com', iat: 1, ver: 1 };
-        const jwt = await signJwt(payload, SECRET);
+        const jwt = await signJwt(payload, TEST_PRIVATE_KEY);
         const [h, b, s] = jwt.split('.');
         const tampered = `${h}.${b.slice(0, b.length - 1)}x.${s}`;
-        expect(await verifyJwt(tampered, SECRET)).toBe(false);
+        expect(await verifyJwt(tampered, TEST_PUBLIC_KEY)).toBe(false);
     });
 
-    it('rejects signature from a different secret', async () => {
+    it('rejects a signature minted with a DIFFERENT key (cannot be forged)', async () => {
+        // An attacker who cannot read our private key would have to sign with
+        // their own key. Such a token must NOT verify against our public key —
+        // that's the anti-minting guarantee.
+        const { privateKey: forger } = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
         const payload = { sub: 'foo', email: 'a@b.com', iat: 1, ver: 1 };
-        const jwt = await signJwt(payload, SECRET);
-        expect(await verifyJwt(jwt, 'wrong-secret-key-that-is-different')).toBe(false);
+        const forged = await signJwt(
+            payload,
+            Buffer.from(await crypto.subtle.exportKey('pkcs8', forger)).toString('base64'),
+        );
+        expect(await verifyJwt(forged, TEST_PUBLIC_KEY)).toBe(false);
+        expect(decodeJwt(forged)?.email).toBe('a@b.com'); // payload decodes, sig is what rejects it
     });
 
     it('returns null on malformed JWT', () => {
