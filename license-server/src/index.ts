@@ -213,15 +213,44 @@ export default {
         const { pathname } = url;
         const method = request.method;
 
-        if (method === 'GET' && pathname === '/health') return json({ ok: true });
-        if (method === 'GET' && pathname === '/blacklist.json') return handleBlacklist();
-        if (method === 'GET' && pathname === '/public-key') return handlePublicKey(env);
+        // CORS: the Playground calls /public-key, /blacklist.json and
+        // /telemetry cross-origin from the browser, so every response needs
+        // the ACAO header and GET/POST requests that carry non-simple headers
+        // require a handled OPTIONS preflight. Allow any origin (these
+        // endpoints are public or token-gated). Webhook /mint /resend don't
+        // need CORS, but a permissive header is harmless since they require
+        // an Authorization token.
+        if (method === 'OPTIONS') {
+            return new Response(null, { status: 204, headers: corsHeaders() });
+        }
 
-        if (method === 'POST' && pathname === '/mint') return handleMint(env, request);
-        if (method === 'POST' && pathname === '/webhook') return handleWebhook(env, request);
-        if (method === 'POST' && pathname === '/resend') return handleResend(env, request);
-        if (method === 'POST' && pathname === '/telemetry') return handleTelemetry(env, request);
+        let response: Response;
+        if (method === 'GET' && pathname === '/health') response = json({ ok: true });
+        else if (method === 'GET' && pathname === '/blacklist.json') response = handleBlacklist();
+        else if (method === 'GET' && pathname === '/public-key') response = handlePublicKey(env);
+        else if (method === 'POST' && pathname === '/mint') response = await handleMint(env, request);
+        else if (method === 'POST' && pathname === '/webhook') response = await handleWebhook(env, request);
+        else if (method === 'POST' && pathname === '/resend') response = await handleResend(env, request);
+        else if (method === 'POST' && pathname === '/telemetry') response = await handleTelemetry(env, request);
+        else response = json({ error: 'not found' }, 404);
 
-        return json({ error: 'not found' }, 404);
+        const headers = new Headers(response.headers);
+        for (const [k, v] of Object.entries(corsHeaders())) headers.set(k, v);
+        response = new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+        });
+        return response;
     },
 };
+
+/** CORS headers for all endpoints (allow any origin; endpoints are public or token-gated). */
+function corsHeaders(): Record<string, string> {
+    return {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Max-Age': '86400',
+    };
+}
