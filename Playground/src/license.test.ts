@@ -250,6 +250,44 @@ describe('nag dialog', () => {
         overlay2.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
         expect(document.querySelector('.license-nag-overlay')).toBeNull();
     });
+
+    it('shows an "invalid key" message when a bad key is applied', async () => {
+        clearLicense();
+        localStorage.setItem('fade.licenseUsage', JSON.stringify({ exports: 0, compiles: 500 }));
+        await maybeNag('compile');
+
+        const overlay = document.querySelector('.license-nag-overlay')!;
+        const enterBtn = Array.from(overlay.querySelectorAll('button'))
+            .find((b) => b.textContent === 'Enter Key');
+        (enterBtn as HTMLButtonElement).click();
+
+        const input = document.getElementById('license-nag-key-input') as HTMLInputElement | null;
+        expect(input).not.toBeNull();
+        // Bad signature — decodes but does not verify, so it must be rejected.
+        input!.value = `eyJhbGciOiJFZERTQSJ9.${b64urlJson(VALID_PAYLOAD)}.bm90LXRoZS1yZWFsLXNpZ25hdHVyZQ`;
+
+        const applyBtn = Array.from(overlay.querySelectorAll('button'))
+            .find((b) => b.textContent === 'Apply');
+        (applyBtn as HTMLButtonElement).click();
+
+        // Stays on the enter view, no license stored, and an inline error shows.
+        await vi.waitFor(() => {
+            expect(document.getElementById('license-nag-key-error')!.style.display).toBe('block');
+        });
+        expect(hasLicense()).toBe(false);
+        const errEl = document.getElementById('license-nag-key-error')!;
+        expect(errEl.textContent).toMatch(/isn’t valid|not valid/i);
+        expect(document.querySelector('.license-nag-overlay')!.textContent).toContain('Enter your license key');
+
+        // Clear the key + retry with the real key succeeds and flips to the
+        // thank-you view (which replaces the form, error element included).
+        input!.value = VALID_JWT;
+        (applyBtn as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(hasLicense()).toBe(true));
+
+        overlay.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        expect(document.querySelector('.license-nag-overlay')).toBeNull();
+    });
 });
 
 describe('applyLicenseFromUrl', () => {

@@ -482,6 +482,15 @@ const NAG_CSS = `
     color: var(--fg-muted);
     line-height: 1.4;
 }
+.license-enter-error {
+    font-size: 0.78rem;
+    color: #f48771;
+    line-height: 1.4;
+    padding: 8px 10px;
+    border: 1px solid rgba(244,135,113,0.4);
+    border-radius: 3px;
+    background: rgba(244,135,113,0.08);
+}
 .license-enter-actions {
     display: flex;
     justify-content: flex-end;
@@ -597,15 +606,36 @@ function showNagDialog(event: 'export' | 'compile', count: number): void {
     const { kicker, title, body, foot, dismiss } = shell;
 
     const KEY_INPUT_ID = 'license-nag-key-input';
+    const KEY_ERROR_ID = 'license-nag-key-error';
+
+    const setKeyError = (message: string | null) => {
+        const errEl = document.getElementById(KEY_ERROR_ID);
+        if (!errEl) return;
+        if (message) {
+            errEl.textContent = message;
+            errEl.style.display = 'block';
+        } else {
+            errEl.textContent = '';
+            errEl.style.display = 'none';
+        }
+    };
 
     const applyKey = async () => {
         const input = document.getElementById(KEY_INPUT_ID) as HTMLInputElement | null;
         const raw = input?.value.trim() ?? '';
         if (!raw) return;
+        setKeyError(null);
         // Successful application → swap to the thank-you view (also fires on
         // the Settings tab via the license-change subscription). storeLicense
-        // verifies the Ed25519 signature and rejects a forged key.
-        if (await storeLicense(raw)) renderThankYou();
+        // verifies the Ed25519 signature and rejects a forged/stale key —
+        // surface that rejection instead of silently doing nothing.
+        if (await storeLicense(raw)) {
+            renderThankYou();
+        } else {
+            input?.focus();
+            input?.select();
+            setKeyError('That key isn’t valid. Double-check it and try again.');
+        }
     };
 
     // ── "Pitch" view: the persuade/thank-you card ──────────────────────
@@ -708,6 +738,12 @@ function showNagDialog(event: 'export' | 'compile', count: number): void {
         hint.className = 'license-enter-hint';
         hint.textContent = 'Your key was emailed to you right after purchase. You can also open the emailed link to activate automatically.';
         body.appendChild(hint);
+
+        const error = document.createElement('div');
+        error.id = KEY_ERROR_ID;
+        error.className = 'license-enter-error';
+        error.style.display = 'none';
+        body.appendChild(error);
 
         const actions = document.createElement('div');
         actions.className = 'license-enter-actions';

@@ -6229,7 +6229,7 @@ async function bootstrap() {
     // hosts the 'search' panel. Click a result → open the file + reveal the
     // line, mirroring the Problems panel's navigation behavior.
     const settingsHost = document.getElementById('settings-host');
-    let settingsPanelHandle: { focus(): void; dispose(): void } | undefined;
+    let settingsPanelHandle: { focus(): void; openScope(scope: 'user' | 'workspace' | 'license'): void; dispose(): void } | undefined;
     if (settingsHost) {
         settingsPanelHandle = mountSettingsPanel({
             container: settingsHost,
@@ -8340,7 +8340,13 @@ async function bootstrap() {
         };
         render();
         onLicenseChange(render);
-        el.addEventListener('click', () => showLicenseDialog());
+        // Clicking the badge opens the Settings panel on the License tab
+        // (instead of the quick key-entry popup) so users can paste a key,
+        // buy one, or remove the current one from one place.
+        el.addEventListener('click', () => {
+            openPanelById('settings');
+            settingsPanelHandle?.openScope('license');
+        });
     }
 
     // License system (Sublime-style nagware — nothing is gated). Configure

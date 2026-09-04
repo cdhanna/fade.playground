@@ -773,9 +773,9 @@
             border-color: var(--chip-remote-border, rgba(77,166,255,0.35));
         }
         .license-status-licensed {
-            background:   var(--chip-unsaved-bg, rgba(255, 183, 77, 0.18));
-            color:        var(--chip-unsaved-fg, #ffb74d);
-            border-color: var(--chip-unsaved-border, rgba(255,183,77,0.35));
+            background:   var(--chip-ok-bg, rgba(46, 160, 67, 0.20));
+            color:        var(--chip-ok-fg, #4ec97f);
+            border-color: var(--chip-ok-border, rgba(46,160,67,0.45));
         }
         /* Live-session pill — sits next to sharing chips. Visible only
            when a session is in flight; clicking opens the Live Session
@@ -5773,6 +5773,15 @@
                  icon + chips. Run/Stop/Debug/Export get pushed to the
                  right by the .grow spacer below. -->
             <span id="project-name" class="project-name" title="Active project — click to switch (⌘P)" hidden></span>
+            <!-- License status badge — the leftmost nav button. "Trial" by
+                 default, flips to a success-tinted "Licensed" once a verified
+                 Ed25519 key is installed. Click opens Settings → License. -->
+            <button id="license-status-pill"
+                    class="license-status-pill license-status-trial"
+                    type="button"
+                    title="Trial — support Fade with a license">
+                Trial
+            </button>
             <div class="view-menu-wrap" id="view-menu-wrap">
                 <vscode-button id="view-menu-btn" icon="layout" secondary="true" title="View — open panels, manage layouts">View</vscode-button>
                 <div id="view-menu" class="view-menu" hidden>
@@ -5816,15 +5825,6 @@
                      same element grows into a peer-pill strip — the icon stays
                      at the leading edge throughout. -->
                 <div id="live-session-chip" class="live-session-chip live-session-chip-idle"></div>
-                <!-- License status badge: "Trial" until a verified license
-                     is installed, then "Licensed". Click opens the license
-                     dialog. -->
-                <button id="license-status-pill"
-                        class="license-status-pill license-status-trial"
-                        type="button"
-                        title="Trial — support Fade with a license">
-                    Trial
-                </button>
             </div>
             <span class="grow"></span>
             <!-- Action buttons, right-anchored (see .header-actions). -->

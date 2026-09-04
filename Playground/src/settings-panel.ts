@@ -37,7 +37,7 @@ export interface SettingsPanelDeps {
 
 type Scope = 'user' | 'workspace' | 'license';
 
-export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; dispose(): void } {
+export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; openScope(scope: Scope): void; dispose(): void } {
     const { container, getProjectName, showLicenseDialog } = deps;
 
     container.innerHTML = '';
@@ -596,6 +596,14 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; di
                 'input, select, textarea',
             );
             firstInput?.focus();
+        },
+        // Programmatically switch to a given scope tab (e.g. "license" when the
+        // top-bar badge is clicked). Mirrors a tab click: drop back to the form
+        // view and re-render.
+        openScope(scope: Scope) {
+            activeScope = scope;
+            viewMode = 'form';
+            render();
         },
         dispose() {
             unsubscribe();
