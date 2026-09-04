@@ -59,35 +59,35 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_PRIVATE_KEY }}" | npx wrangler secret put LICENSE_PRIVATE_KEY --name fade-license
+        run: echo "${{ secrets.LICENSE_PRIVATE_KEY }}" | npx wrangler secret put LICENSE_PRIVATE_KEY --name fade-license --strategy force
 
       - name: Set ADMIN_API_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_ADMIN_API_KEY }}" | npx wrangler secret put ADMIN_API_KEY --name fade-license
+        run: echo "${{ secrets.LICENSE_ADMIN_API_KEY }}" | npx wrangler secret put ADMIN_API_KEY --name fade-license --strategy force
 
       - name: Set STRIPE_SECRET_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_STRIPE_SECRET_KEY }}" | npx wrangler secret put STRIPE_SECRET_KEY --name fade-license
+        run: echo "${{ secrets.LICENSE_STRIPE_SECRET_KEY }}" | npx wrangler secret put STRIPE_SECRET_KEY --name fade-license --strategy force
 
       - name: Set STRIPE_WEBHOOK_SECRET
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_STRIPE_WEBHOOK_SECRET }}" | npx wrangler secret put STRIPE_WEBHOOK_SECRET --name fade-license
+        run: echo "${{ secrets.LICENSE_STRIPE_WEBHOOK_SECRET }}" | npx wrangler secret put STRIPE_WEBHOOK_SECRET --name fade-license --strategy force
 
       - name: Set RESEND_API_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_RESEND_API_KEY }}" | npx wrangler secret put RESEND_API_KEY --name fade-license
+        run: echo "${{ secrets.LICENSE_RESEND_API_KEY }}" | npx wrangler secret put RESEND_API_KEY --name fade-license --strategy force
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
