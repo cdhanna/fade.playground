@@ -54,40 +54,55 @@ jobs:
       # Push the secrets into the worker's encrypted secret store BEFORE
       # deploy so the freshly-uploaded script has them available on first
       # request. `wrangler secret put` reads the value from stdin.
+      # Neither wrangler 3.x nor the latest 4.x supports `secret put
+      # --strategy force`, and `secret put` errors with "binding already in
+      # use" on an existing secret — so delete-first (no-ops with `|| true`
+      # when the binding doesn't exist yet), then set. This makes the step
+      # idempotent across CI reruns on any wrangler version.
       - name: Set LICENSE_PRIVATE_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_PRIVATE_KEY }}" | npx wrangler secret put LICENSE_PRIVATE_KEY --name fade-license --strategy force
+        run: |
+          npx wrangler secret delete LICENSE_PRIVATE_KEY --name fade-license || true
+          echo "${{ secrets.LICENSE_PRIVATE_KEY }}" | npx wrangler secret put LICENSE_PRIVATE_KEY --name fade-license
 
       - name: Set ADMIN_API_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_ADMIN_API_KEY }}" | npx wrangler secret put ADMIN_API_KEY --name fade-license --strategy force
+        run: |
+          npx wrangler secret delete ADMIN_API_KEY --name fade-license || true
+          echo "${{ secrets.LICENSE_ADMIN_API_KEY }}" | npx wrangler secret put ADMIN_API_KEY --name fade-license
 
       - name: Set STRIPE_SECRET_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_STRIPE_SECRET_KEY }}" | npx wrangler secret put STRIPE_SECRET_KEY --name fade-license --strategy force
+        run: |
+          npx wrangler secret delete STRIPE_SECRET_KEY --name fade-license || true
+          echo "${{ secrets.LICENSE_STRIPE_SECRET_KEY }}" | npx wrangler secret put STRIPE_SECRET_KEY --name fade-license
 
       - name: Set STRIPE_WEBHOOK_SECRET
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_STRIPE_WEBHOOK_SECRET }}" | npx wrangler secret put STRIPE_WEBHOOK_SECRET --name fade-license --strategy force
+        run: |
+          npx wrangler secret delete STRIPE_WEBHOOK_SECRET --name fade-license || true
+          echo "${{ secrets.LICENSE_STRIPE_WEBHOOK_SECRET }}" | npx wrangler secret put STRIPE_WEBHOOK_SECRET --name fade-license
 
       - name: Set RESEND_API_KEY
         working-directory: license-server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: echo "${{ secrets.LICENSE_RESEND_API_KEY }}" | npx wrangler secret put RESEND_API_KEY --name fade-license --strategy force
+        run: |
+          npx wrangler secret delete RESEND_API_KEY --name fade-license || true
+          echo "${{ secrets.LICENSE_RESEND_API_KEY }}" | npx wrangler secret put RESEND_API_KEY --name fade-license
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
