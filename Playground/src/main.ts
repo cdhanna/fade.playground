@@ -8344,7 +8344,14 @@ async function bootstrap() {
         // (instead of the quick key-entry popup) so users can paste a key,
         // buy one, or remove the current one from one place.
         el.addEventListener('click', () => {
-            openPanelById('settings');
+            // Open the Settings panel, scoped to the License tab. If the panel
+            // is already open, activate it rather than re-adding (addPanel
+            // throws "panel with id settings already exists" on a duplicate).
+            if (dockApi.getPanel('settings')) {
+                dockApi.getPanel('settings')?.api?.setActive();
+            } else {
+                openPanelById('settings');
+            }
             settingsPanelHandle?.openScope('license');
         });
     }

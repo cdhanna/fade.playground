@@ -155,6 +155,12 @@ export function mountSettingsPanel(deps: SettingsPanelDeps): { focus(): void; op
         ));
         if (status) {
             section.appendChild(field(
+                'Name',
+                status?.name ?? '—',
+                'The name on this license, if the emailer included one.',
+            ));
+
+            section.appendChild(field(
                 'Minted',
                 formatMintDate(status.iat),
                 'The date this license key was issued (the token “iat” timestamp).',

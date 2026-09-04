@@ -128,12 +128,18 @@ export function ensureVerified(): Promise<void> {
         const payload = await verifyAndDecode(jwt);
         if (payload) {
             verifiedPayload = payload;
+            // The badge's initial render happened synchronously at mount (before
+            // this async verification resolved) → still shows "Trial". Notify
+            // listeners so the badge flips to "Licensed" and any live UI (the
+            // Settings License tab) re-renders.
+            emitLicenseChange();
         } else if (await getPublicKey()) {
             // A public key is configured and the stored key failed to verify
             // → it's forged/stale. Drop it and go unlicensed. When no public
             // key is available we can't form a verdict, so we leave the key
             // untouched (it just isn't trusted this session).
             clearStoredKey();
+            emitLicenseChange();
         }
     })().finally(() => {
         verificationPromise = null;
