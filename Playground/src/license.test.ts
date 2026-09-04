@@ -54,7 +54,7 @@ const VALID_PAYLOAD = {
 
 // Throwaway Ed25519 keypair + a real signed JWT, minted once at module load.
 let privateKey: CryptoKey;
-let PUBLIC_KEY_B64: string;
+let PUBLIC_KEY_JWK: import('./license').Ed25519JWK;
 let VALID_JWT: string;
 
 async function signJwt(payload: unknown): Promise<string> {
@@ -68,8 +68,13 @@ async function signJwt(payload: unknown): Promise<string> {
 beforeAll(async () => {
     const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
     privateKey = pair.privateKey;
-    const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
-    PUBLIC_KEY_B64 = btoa(Array.from(rawPub, (b) => String.fromCharCode(b)).join(''));
+    const jwk = (await crypto.subtle.exportKey('jwk', pair.publicKey)) as JsonWebKey;
+    PUBLIC_KEY_JWK = {
+        kty: 'OKP',
+        crv: 'Ed25519',
+        x: jwk.x!,
+        alg: 'EdDSA',
+    };
     VALID_JWT = await signJwt(VALID_PAYLOAD);
 });
 
@@ -86,7 +91,7 @@ beforeEach(() => {
         buyUrl: 'https://x/buy',
         blacklistUrl: 'https://x/blacklist.json',
         telemetryUrl: 'https://x/telemetry',
-        publicKey: PUBLIC_KEY_B64,
+        publicKey: PUBLIC_KEY_JWK,
         publicKeyUrl: 'https://x/public-key',
     });
     // default: blacklist empty, telemetry no-op

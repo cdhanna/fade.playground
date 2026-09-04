@@ -12,7 +12,9 @@
 #     -d '{"email":"buyer@example.com"}'
 
 LICENSE_PRIVATE_KEY=change-me-base64-pkcs8-ed25519-private-key
-LICENSE_PUBLIC_KEY=change-me-base64-raw-ed25519-public-key
+# LICENSE_PUBLIC_KEY is an Ed25519 JWK as a single-line JSON string
+# (the public half of the same pair; safe to expose, served at /public-key).
+LICENSE_PUBLIC_KEY={"kty":"OKP","crv":"Ed25519","x":"<base64url>","alg":"EdDSA"}
 ADMIN_API_KEY=dev-admin-key
 STRIPE_SECRET_KEY=sk_test_xxxxxxxxxxxxxxxxxxxxxxxx
 STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

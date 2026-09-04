@@ -196,7 +196,13 @@ function handleBlacklist(): Response {
 
 /** GET /public-key */
 function handlePublicKey(env: Env): Response {
-    return new Response(JSON.stringify({ publicKey: env.LICENSE_PUBLIC_KEY }), {
+    let publicKey: unknown = env.LICENSE_PUBLIC_KEY;
+    try {
+        publicKey = JSON.parse(env.LICENSE_PUBLIC_KEY);
+    } catch {
+        /* fall back to serving the raw string */
+    }
+    return new Response(JSON.stringify({ publicKey }), {
         status: 200,
         headers: {
             'Content-Type': 'application/json; charset=utf-8',

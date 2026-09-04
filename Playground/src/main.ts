@@ -8355,12 +8355,24 @@ async function bootstrap() {
         // dev convenience where a checkout endpoint is served on the worker.
         const buyUrl = (import.meta.env.VITE_LICENSE_BUY_URL as string | undefined)
             ?? (licenseHost ? licenseHost + '/buy' : undefined);
-        const publicKey = import.meta.env.VITE_LICENSE_PUBLIC_KEY as string | undefined;
+        const publicKeyRaw = import.meta.env.VITE_LICENSE_PUBLIC_KEY as string | undefined;
+        // The embedded public key (if any) is an Ed25519 JWK as JSON. Parse it
+        // defensively so a malformed override just falls back to fetching
+        // /public-key from the server.
+        let publicKey: LicenseConfig['publicKey'] = undefined;
+        if (publicKeyRaw) {
+            try {
+                const parsed = JSON.parse(publicKeyRaw) as LicenseConfig['publicKey'];
+                if (parsed && parsed.kty === 'OKP' && typeof parsed.x === 'string') publicKey = parsed;
+            } catch {
+                /* ignore malformed embedded key */
+            }
+        }
         const config: LicenseConfig | null = (licenseHost || buyUrl || publicKey) ? {
             buyUrl: buyUrl ?? '',
             blacklistUrl: licenseHost ? licenseHost + '/blacklist.json' : '',
             telemetryUrl: licenseHost ? licenseHost + '/telemetry' : '',
-            publicKey: publicKey ?? undefined,
+            publicKey,
             publicKeyUrl: licenseHost ? licenseHost + '/public-key' : '',
         } : null;
         if (config) {

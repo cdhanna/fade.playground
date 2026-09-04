@@ -8,7 +8,7 @@ export interface Env {
     RESEND_API_KEY?: string;
 
     // Non-secret (wrangler.toml [vars])
-    /** base64 raw Ed25519 public key — verifies JWTs; safe to expose. */
+    /** JSON string of the Ed25519 JWK public key — verifies JWTs; safe to expose. */
     LICENSE_PUBLIC_KEY: string;
     UUID_NAMESPACE: string;
     FROM_EMAIL: string;

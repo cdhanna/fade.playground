@@ -7,8 +7,9 @@
  * key was minted by us without ever holding the private key.
  *
  * Key material (see scripts/generate-keys.mjs):
- *   - private key: base64 of the PKCS8 DER export
- *   - public key : base64 of the raw 32-byte RFC 8032 public key
+ *   - private key: base64 of the PKCS8 DER export (secret; never shipped)
+ *   - public key : an Ed25519 JWK ({kty:OKP,crv:Ed25519,x:<b64url>,alg:EdDSA}),
+ *                  safe to expose and served at GET /public-key.
  */
 
 import type { LicensePayload } from './types';
@@ -16,6 +17,14 @@ import type { LicensePayload } from './types';
 const encoder = new TextEncoder();
 
 const HEADER = { alg: 'EdDSA', typ: 'JWT' };
+
+export interface Ed25519JWK {
+    kty: 'OKP';
+    crv: 'Ed25519';
+    /** base64url-encoded 32-byte RFC 8032 public key */
+    x: string;
+    alg: 'EdDSA';
+}
 
 function base64urlEncode(bytes: Uint8Array): string {
     let bin = '';
@@ -59,10 +68,15 @@ async function importPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
     return crypto.subtle.importKey('pkcs8', der as unknown as ArrayBuffer, { name: 'Ed25519' }, false, ['sign']);
 }
 
-async function importPublicKey(publicKeyBase64: string): Promise<CryptoKey> {
+async function importPublicKey(jwk: Ed25519JWK): Promise<CryptoKey> {
+    return crypto.subtle.importKey('jwk', jwk as unknown as JsonWebKey, { name: 'Ed25519' }, false, ['verify']);
+}
+
+/** Convert a raw base64 32-byte RFC 8032 public key into an Ed25519 JWK. */
+export function jwkFromRawB64(publicKeyBase64: string): Ed25519JWK | null {
     const raw = base64ToBytes(publicKeyBase64);
-    if (!raw) throw new Error('bad public key');
-    return crypto.subtle.importKey('raw', raw as unknown as ArrayBuffer, { name: 'Ed25519' }, false, ['verify']);
+    if (!raw) return null;
+    return { kty: 'OKP', crv: 'Ed25519', x: base64urlEncode(raw), alg: 'EdDSA' };
 }
 
 /** Sign a license payload into a compact JWT using the Ed25519 private key. */
@@ -87,21 +101,21 @@ export function decodeJwt(jwt: string): LicensePayload | null {
     }
 }
 
-/** Verify the Ed25519 signature of a compact JWT against the public key. */
-export async function verifyJwt(jwt: string, publicKeyBase64: string): Promise<boolean> {
+/** Verify the Ed25519 signature of a compact JWT against the public key (JWK). */
+export async function verifyJwt(jwt: string, publicKey: Ed25519JWK): Promise<boolean> {
     const parts = jwt.split('.');
     if (parts.length !== 3) return false;
     const [header, body, sigB64] = parts;
-    let publicKey: CryptoKey;
+    let key: CryptoKey;
     try {
-        publicKey = await importPublicKey(publicKeyBase64);
+        key = await importPublicKey(publicKey);
     } catch {
         return false;
     }
     try {
         return await crypto.subtle.verify(
             'Ed25519',
-            publicKey,
+            key,
             base64urlDecode(sigB64) as unknown as ArrayBuffer,
             encoder.encode(`${header}.${body}`),
         );

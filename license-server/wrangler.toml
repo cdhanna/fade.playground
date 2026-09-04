@@ -19,9 +19,13 @@ workers_dev = true
 
 # Non-secret configuration. LICENSE_PRIVATE_KEY and the API keys are NOT here;
 # set them with `wrangler secret put`. LICENSE_PUBLIC_KEY is public — it's the
-# verify-only half of the Ed25519 pair and is exposed via GET /public-key.
+# verify-only half of the Ed25519 pair (an Ed25519 JWK, JSON) and is exposed
+# via GET /public-key.
 [vars]
-LICENSE_PUBLIC_KEY = "cQ3delXFiT/EP7OTkY+Kn7LUd2tfAfkR2DW1++xW50Y="
+# Ed25519 JWK — the public half of the pair whose PRIVATE half must be set as
+# the LICENSE_PRIVATE_KEY secret. Generate a fresh pair (and keep these halves
+# in sync) with: node scripts/generate-keys.mjs
+LICENSE_PUBLIC_KEY = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"Jpy419I82v_t705OVdcUf0oOrad1wbRjF4_h3hd2-Cc\",\"alg\":\"EdDSA\"}"
 UUID_NAMESPACE = "fade-licenses"
 FROM_EMAIL = "keys@brewed.ink"
 FROM_NAME = "Fade"

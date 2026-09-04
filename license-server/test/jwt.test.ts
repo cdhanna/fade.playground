@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { signJwt, decodeJwt, verifyJwt } from '../src/jwt';
-import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY } from './keys';
+import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY_JWK } from './keys';
 
 describe('jwt (Ed25519)', () => {
     it('signs, decodes, and verifies a payload', async () => {
@@ -13,7 +13,7 @@ describe('jwt (Ed25519)', () => {
         };
         const jwt = await signJwt(payload, TEST_PRIVATE_KEY);
         expect(jwt.split('.')).toHaveLength(3);
-        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY)).toBe(true);
+        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY_JWK)).toBe(true);
         const decoded = decodeJwt(jwt);
         expect(decoded).toMatchObject({
             sub: payload.sub,
@@ -28,7 +28,7 @@ describe('jwt (Ed25519)', () => {
         const jwt = await signJwt(payload, TEST_PRIVATE_KEY);
         const [h, b, s] = jwt.split('.');
         const tampered = `${h}.${b.slice(0, b.length - 1)}x.${s}`;
-        expect(await verifyJwt(tampered, TEST_PUBLIC_KEY)).toBe(false);
+        expect(await verifyJwt(tampered, TEST_PUBLIC_KEY_JWK)).toBe(false);
     });
 
     it('rejects a signature minted with a DIFFERENT key (cannot be forged)', async () => {
@@ -41,7 +41,7 @@ describe('jwt (Ed25519)', () => {
             payload,
             Buffer.from(await crypto.subtle.exportKey('pkcs8', forger)).toString('base64'),
         );
-        expect(await verifyJwt(forged, TEST_PUBLIC_KEY)).toBe(false);
+        expect(await verifyJwt(forged, TEST_PUBLIC_KEY_JWK)).toBe(false);
         expect(decodeJwt(forged)?.email).toBe('a@b.com'); // payload decodes, sig is what rejects it
     });
 

@@ -5,7 +5,10 @@ license system. **No storage.** Every license key is derived deterministically
 from `(email, version)` using a UUID v5, so there is nothing to persist — the
 same email + version always produces the same identity and the same signed JWT.
 
-- JWT is HMAC-SHA256-signed (secret held as a Worker env var).
+- JWT is **Ed25519-signed** (RFC 8032). The server signs with a private key
+  (an env-var **secret**); the Playground verifies with the paired **public**
+  key and rejects any key it didn't mint (anti-minting). The public key is
+  exposed at `GET /public-key`.
 - `sub` = UUID v5 of `fade-licenses : ${email}:${version}` (version defaults to 1).
   Mint a `version: 2` JWT for the same email after a blacklist → brand-new identity.
 - Revocation is a static `blacklist.json` served by the worker; the Playground
@@ -20,15 +23,38 @@ same email + version always produces the same identity and the same signed JWT.
 | POST | `/resend` | `Bearer ADMIN_API_KEY` | Re-derive + re-send a key by `session_id` |
 | POST | `/telemetry` | none | Log a license check (fire-and-forget) |
 | GET | `/blacklist.json` | none | Serve revoked identity UUIDs |
+| GET | `/public-key` | none | Serve the Ed25519 public key the client verifies against |
 | GET | `/health` | none | Health check |
+
+## Keypair
+
+The worker signs with the **private** half of an Ed25519 keypair; the
+Playground holds only the **public** half, so a fork of the client can't mint
+keys. Generate a fresh pair and print the values + `wrangler secret put`
+command:
+
+```sh
+node scripts/generate-keys.mjs
+```
+
+Output:
+- **Private key** — base64 **PKCS8** DER → becomes the `LICENSE_PRIVATE_KEY`
+  **secret**.
+- **Public key** — an **Ed25519 JWK** (`{"kty":"OKP","crv":"Ed25519","x":...,"alg":"EdDSA"}`)
+  as a single-line JSON → becomes the `LICENSE_PUBLIC_KEY` **`[vars]` value**
+  (not a secret; it's served publicly). Must match the private key's pair.
+
+> The test suite uses its own throwaway pair in `test/keys.ts` — never reuse
+> those values in production.
 
 ## Deploy
 
 ```sh
 npm install
 
-# Set secrets (encrypted at rest)
-npx wrangler secret put HMAC_SECRET
+# Set secrets (encrypted at rest). First generate a keypair and grab the
+# private half: node scripts/generate-keys.mjs
+npx wrangler secret put LICENSE_PRIVATE_KEY
 npx wrangler secret put ADMIN_API_KEY
 npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_WEBHOOK_SECRET   # only needed for /webhook
@@ -37,8 +63,9 @@ npx wrangler secret put RESEND_API_KEY
 npx wrangler deploy
 ```
 
-Non-secret config lives in `wrangler.toml` `[vars]`: `UUID_NAMESPACE`,
-`FROM_EMAIL`, `PLAYGROUND_URL`. Adjust `FROM_EMAIL` to a domain you control
+Non-secret config lives in `wrangler.toml` `[vars]`: `LICENSE_PUBLIC_KEY`
+(the public half of the pair — safe to expose), `UUID_NAMESPACE`, `FROM_EMAIL`,
+`PLAYGROUND_URL`. Adjust `FROM_EMAIL` to a domain you control
 (resend requires a verified sending domain) and `PLAYGROUND_URL` to your real
 Playground origin.
 
@@ -58,7 +85,7 @@ Playground origin.
   |--------|-------|
   | `CLOUDFLARE_API_TOKEN` | Workers Scripts: Edit (shared with Pages deploy) |
   | `CLOUDFLARE_ACCOUNT_ID` | the account owning `fade-license` |
-  | `LICENSE_HMAC_SECRET` | random ≥32 bytes — signs every JWT |
+  | `LICENSE_PRIVATE_KEY` | base64 PKCS8 Ed25519 **private** key — signs every JWT (from `node scripts/generate-keys.mjs`) |
   | `LICENSE_ADMIN_API_KEY` | bearer token for `/mint` + `/resend` |
   | `LICENSE_STRIPE_SECRET_KEY` | Stripe `sk_...` |
   | `LICENSE_STRIPE_WEBHOOK_SECRET` | Stripe `whsec_...` |
@@ -233,11 +260,12 @@ cd license-server
 cp .dev.vars.example .dev.vars
 ```
 
-Fill in four values:
+Fill in these values:
 
 | Key | Where to get it | Example |
 |-----|-----------------|---------|
-| `HMAC_SECRET` | generate: `openssl rand -hex 16` | `a91f...` |
+| `LICENSE_PRIVATE_KEY` | `node scripts/generate-keys.mjs` → the private (PKCS8) half | `MC4CAQAwBQYDK2VwBCIE...` |
+| `LICENSE_PUBLIC_KEY` | `node scripts/generate-keys.mjs` → the public (Ed25519 JWK) half — must match the private key's pair | `{"kty":"OKP",...}` |
 | `ADMIN_API_KEY` | generate anything | `dev-admin-key` |
 | `STRIPE_SECRET_KEY` | Stripe Dashboard → Developers → API keys → **Test** `sk_test_...` | `sk_test_51...` |
 | `RESEND_API_KEY` | Resend dashboard → API keys → `re_...` | `re_...` |

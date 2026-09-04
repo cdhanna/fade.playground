@@ -2,14 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker from '../src/index';
 import type { Env } from '../src/types';
 import { verifyJwt, decodeJwt } from '../src/jwt';
-import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY } from './keys';
+import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY_JWK } from './keys';
 
 const WH_SECRET = 'whsec_testsecret_000';
 const RESEND = 're_test_000';
 
 const env: Env = {
     LICENSE_PRIVATE_KEY: TEST_PRIVATE_KEY,
-    LICENSE_PUBLIC_KEY: TEST_PUBLIC_KEY,
+    LICENSE_PUBLIC_KEY: JSON.stringify(TEST_PUBLIC_KEY_JWK),
     ADMIN_API_KEY: 'admin',
     STRIPE_SECRET_KEY: 'sk_test_000',
     STRIPE_WEBHOOK_SECRET: WH_SECRET,
@@ -124,7 +124,7 @@ describe('license worker /webhook', () => {
         expect(sent.lastTemplateId).toBe('fade-purchase');
         const jwt = sent.lastKey;
         expect(jwt).toBeTruthy();
-        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY)).toBe(true);
+        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY_JWK)).toBe(true);
         const decoded = decodeJwt(jwt);
         expect(decoded?.email).toBe('buyer@example.com');
         expect(decoded?.sub).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

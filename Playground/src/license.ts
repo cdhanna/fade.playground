@@ -159,10 +159,20 @@ export function clearLicense(): void {
 
 // ── Ed25519 verification ───────────────────────────────────────────────
 
+// Known Ed25519 public key shape (RFC 8037 JWK). Only the public half lives
+// client-side; it can verify signatures but never mint them.
+export interface Ed25519JWK {
+    kty: 'OKP';
+    crv: 'Ed25519';
+    /** base64url-encoded 32-byte RFC 8032 public key */
+    x: string;
+    alg: 'EdDSA';
+}
+
 // Resolve the Ed25519 public key: embedded config first, else fetch the
 // worker's /public-key endpoint. Cached after the first successful read.
-let cachedPublicKey: string | null = null;
-async function getPublicKey(): Promise<string | null> {
+let cachedPublicKey: Ed25519JWK | null = null;
+async function getPublicKey(): Promise<Ed25519JWK | null> {
     if (cachedPublicKey) return cachedPublicKey;
     if (config?.publicKey) {
         cachedPublicKey = config.publicKey;
@@ -172,8 +182,8 @@ async function getPublicKey(): Promise<string | null> {
         try {
             const res = await fetch(config.publicKeyUrl, { cache: 'no-store' });
             if (res.ok) {
-                const data = (await res.json()) as { publicKey?: string };
-                if (data.publicKey) {
+                const data = (await res.json()) as { publicKey?: Ed25519JWK };
+                if (data.publicKey && data.publicKey.kty === 'OKP' && typeof data.publicKey.x === 'string') {
                     cachedPublicKey = data.publicKey;
                     return cachedPublicKey;
                 }
@@ -209,20 +219,13 @@ function b64urlToBytes(b64url: string): Uint8Array<ArrayBuffer> {
     return out;
 }
 
-function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
-    const bin = atob(b64);
-    const out = new Uint8Array(new ArrayBuffer(bin.length));
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-}
-
-async function verifyEd25519(jwt: string, publicKeyBase64: string): Promise<boolean> {
+async function verifyEd25519(jwt: string, jwk: Ed25519JWK): Promise<boolean> {
     const parts = jwt.split('.');
     if (parts.length !== 3) return false;
     if (!crypto?.subtle) return false;
     const key = await crypto.subtle.importKey(
-        'raw',
-        base64ToBytes(publicKeyBase64),
+        'jwk',
+        jwk,
         { name: 'Ed25519' },
         false,
         ['verify'],
@@ -503,9 +506,9 @@ export interface LicenseConfig {
     blacklistUrl: string;
     telemetryUrl: string;
     // Ed25519 public key used to verify license JWTs. Either embed
-    // `publicKey` (base64 raw 32-byte RFC 8032 key) for an offline override,
-    // or point `publicKeyUrl` at the worker's GET /public-key endpoint.
-    publicKey?: string;
+    // `publicKey` (an Ed25519 JWK object) for an offline override, or point
+    // `publicKeyUrl` at the worker's GET /public-key endpoint.
+    publicKey?: Ed25519JWK;
     publicKeyUrl: string;
 }
 

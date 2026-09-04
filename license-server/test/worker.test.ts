@@ -3,13 +3,13 @@ import worker from '../src/index';
 import type { Env } from '../src/types';
 import { deriveIdentity } from '../src/uuid';
 import { verifyJwt, decodeJwt } from '../src/jwt';
-import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY } from './keys';
+import { TEST_PRIVATE_KEY, TEST_PUBLIC_KEY_JWK } from './keys';
 
 const ADMIN = 'test-admin-key';
 
 const env: Env = {
     LICENSE_PRIVATE_KEY: TEST_PRIVATE_KEY,
-    LICENSE_PUBLIC_KEY: TEST_PUBLIC_KEY,
+    LICENSE_PUBLIC_KEY: JSON.stringify(TEST_PUBLIC_KEY_JWK),
     ADMIN_API_KEY: ADMIN,
     STRIPE_SECRET_KEY: '', // not used in these tests
     STRIPE_WEBHOOK_SECRET: '',
@@ -63,7 +63,7 @@ describe('license worker', () => {
         expect(res.status).toBe(200);
         const { jwt, identity } = (await res.json()) as { jwt: string; identity: string };
 
-        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY)).toBe(true);
+        expect(await verifyJwt(jwt, TEST_PUBLIC_KEY_JWK)).toBe(true);
         const decoded = decodeJwt(jwt);
         expect(decoded?.email).toBe('buyer@example.com');
         expect(decoded?.sub).toBe(identity);
@@ -104,5 +104,25 @@ describe('license worker', () => {
     it('unknown route returns 404', async () => {
         const res = await call({ path: '/nope' });
         expect(res.status).toBe(404);
+    });
+
+    it('serves the Ed25519 public key over CORS (browser can fetch /public-key)', async () => {
+        const res = await call({ path: '/public-key' });
+        expect(res.status).toBe(200);
+        expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
+        const { publicKey } = (await res.json()) as { publicKey: unknown };
+        expect(publicKey).toEqual(TEST_PUBLIC_KEY_JWK);
+    });
+
+    it('cross-origin GET endpoints carry the CORS allow-origin header', async () => {
+        const res = await call({ path: '/blacklist.json' });
+        expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
+    });
+
+    it('answers an OPTIONS preflight with CORS headers (204)', async () => {
+        const res = await call({ path: '/public-key', method: 'OPTIONS' });
+        expect(res.status).toBe(204);
+        expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
+        expect(res.headers.get('Access-Control-Allow-Methods')).toContain('GET');
     });
 });
